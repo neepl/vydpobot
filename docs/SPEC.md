@@ -379,7 +379,15 @@ settings: `HEALTHCHECKS_POLL_S` (default 300, min 60), `HEALTHCHECKS_API_URL` (d
   cleared silently on the next success.
 - Bot: separate repeating job (`first` = 15 s), cache of the last `FetchResult` in
   `bot_data["equipment_cache"]`. `/health` (read-only access) lists entries in env order with
-  status emoji, name and last ping; pinned live caption gets `🩺 ok/total OK · 🔴 names` before
-  the "Data" line (names truncated to keep the caption under 1024 characters); live message is
-  refreshed after an equipment job that produced events.
+  status emoji, name and last ping. Pinned live caption gets, before the "Data" line, a section
+  built by `equipment_section(result, lang, tz, now, budget)`: header `🩺 Equipment`, then one
+  line per entry in env order (same emoji map as `/health`; down: `— down since HH:MM`, or
+  `dd.mm HH:MM` if not today, `—` when last_ping is null; unmatched: `— not found`; names
+  HTML-escaped). Budget: the caption stays < 1024 chars; if the section does not fit, down checks
+  come first, then the rest in env order, closed by `… +N`; if header + one line do not fit, the
+  old one-line `equipment_line` summary (`🩺 ok/total OK · 🔴 names`, truncated) is the fallback.
+- Live refresh (stored sample only, no Solarman call) after an equipment job when it is the first
+  successful fetch since startup, or the tuple of (entry, status) differs from the previous
+  successful fetch (`bot_data["equipment_picture"]`; last_ping changes alone do not count), or
+  events were produced; at most one refresh per job run.
 

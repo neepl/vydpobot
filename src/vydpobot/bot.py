@@ -23,6 +23,7 @@ from vydpobot.alerts import (
 from vydpobot.charts import render_chart, summarize
 from vydpobot.config import Settings
 from vydpobot.equipment import (
+    Check,
     EquipEvent,
     EquipmentError,
     EquipmentMonitor,
@@ -234,10 +235,57 @@ def format_live_caption(
     if stale:
         tail.append(html.escape(t(lang, "live.stale", time=_local(s.ts, tz, now))))
     if equipment is not None:
-        base = len("\n".join(lines + tail)) + 1  # +1: newline before the equipment line
-        if line := equipment_line(equipment, lang, CAPTION_LIMIT - 1 - base):
-            tail.insert(1, line)  # just before the "Data: ..." line
+        base = len("\n".join(lines + tail)) + 2  # +2: block newline + blank line after it
+        budget = CAPTION_LIMIT - 1 - base
+        block = equipment_section(equipment, lang, tz, now, budget) or equipment_line(
+            equipment, lang, budget
+        )
+        if block:
+            tail[1:1] = [block, ""]  # own paragraph, just before the "Data: ..." line
     return "\n".join(lines + tail)
+
+
+def _equip_label(entry: str, c: Check | None) -> tuple[str, str]:
+    """(status emoji, HTML-escaped name) of one configured entry; shared by /health and live."""
+    if c is None:
+        return NOT_FOUND_EMOJI, html.escape(entry)
+    return EQUIP_EMOJI.get(c.status, NOT_FOUND_EMOJI), html.escape(c.name)
+
+
+def _section_line(entry: str, c: Check | None, lang: Lang, tz: ZoneInfo, now: datetime) -> str:
+    emoji, name = _equip_label(entry, c)
+    if c is None:
+        return f"{emoji} " + html.escape(t(lang, "live.equip_not_found", name=entry))
+    if c.status == "down":
+        when = _local(c.last_ping, tz, now) if c.last_ping else DASH
+        return f"{emoji} " + html.escape(t(lang, "live.equip_down", name=c.name, time=when))
+    return f"{emoji} {name}"
+
+
+def equipment_section(
+    result: FetchResult, lang: Lang, tz: ZoneInfo, now: datetime, budget: int
+) -> str | None:
+    """Multi-line equipment block for the live caption, at most `budget` characters.
+
+    One line per configured entry in env order. When it does not fit, down checks come first,
+    then the rest in env order, closed by a '… +N' line. None if header + one line won't fit.
+    """
+    if not result.items:
+        return None
+    header = f"🩺 {html.escape(t(lang, 'live.equip_header'))}"
+    items = list(result.items)
+    items.sort(key=lambda it: not (it[1] is not None and it[1].status == "down"))  # stable
+    rows = [_section_line(e, c, lang, tz, now) for e, c in items]
+    env_rows = [_section_line(e, c, lang, tz, now) for e, c in result.items]
+    full = "\n".join([header, *env_rows])
+    if len(full) <= budget:
+        return full
+    for k in range(len(rows) - 1, 0, -1):
+        more = html.escape(t(lang, "live.equip_more", n=len(rows) - k))
+        text = "\n".join([header, *rows[:k], more])
+        if len(text) <= budget:
+            return text
+    return None
 
 
 def equipment_line(result: FetchResult, lang: Lang, budget: int) -> str | None:
@@ -297,11 +345,9 @@ def format_health(result: FetchResult, fetched_at: datetime, lang: Lang, tz: Zon
     now = datetime.now(UTC)
     lines = [f"<b>{html.escape(t(lang, 'health.title'))}</b>", ""]
     for entry, c in result.items:
-        if c is None:
-            lines.append(f"{NOT_FOUND_EMOJI} {html.escape(entry)} · {DASH}")
-            continue
-        when = _local(c.last_ping, tz, now) if c.last_ping else DASH
-        lines.append(f"{EQUIP_EMOJI.get(c.status, NOT_FOUND_EMOJI)} {html.escape(c.name)} · {when}")
+        emoji, name = _equip_label(entry, c)
+        when = _local(c.last_ping, tz, now) if c and c.last_ping else DASH
+        lines.append(f"{emoji} {name} · {when}")
     checked = fetched_at.astimezone(tz).strftime("%H:%M")
     lines += ["", html.escape(t(lang, "health.checked", time=checked))]
     return "\n".join(lines)
@@ -444,6 +490,7 @@ class EquipmentResult:
     alerts: list[str] = field(default_factory=list)  # -> alert chat
     admin_notices: list[str] = field(default_factory=list)  # -> admins' private chats
     changed: bool = False  # events were produced
+    refresh: bool = False  # the live message should be refreshed (events or new picture)
 
 
 def _note_unmatched(bd: dict[str, Any], result: FetchResult) -> None:
@@ -478,6 +525,9 @@ async def equipment_once(bd: dict[str, Any], now: datetime) -> EquipmentResult:
     bd["equipment_fail_count"] = 0
     bd["equipment_notified"] = False
     bd["equipment_cache"] = (result, now)
+    picture = tuple((entry, c.status if c else None) for entry, c in result.items)
+    out.refresh = bd.get("equipment_picture") != picture  # None on the first fetch
+    bd["equipment_picture"] = picture
     try:
         _note_unmatched(bd, result)
         state, events = diff(storage.get_json(KEY_EQUIPMENT_STATE), result.checks, now)
@@ -487,6 +537,7 @@ async def equipment_once(bd: dict[str, Any], now: datetime) -> EquipmentResult:
         return out
     out.alerts = [format_equipment_event(e, lang, settings.tz, now) for e in events]
     out.changed = bool(events)
+    out.refresh = out.refresh or out.changed
     return out
 
 
@@ -948,7 +999,7 @@ async def equipment_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         for chat_id in admin_targets(settings) if result.admin_notices else ():
             for msg in result.admin_notices:
                 await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.HTML)
-        if result.changed:
+        if result.refresh:
             await refresh_live(context.bot, bd, bd["storage"].latest_sample())
     except Exception:
         log.exception("Equipment job failed")

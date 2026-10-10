@@ -1,4 +1,4 @@
-"""healthchecks.io equipment monitoring: config, matching, diff, HTTP, /health, live line."""
+"""healthchecks.io equipment monitoring: config, matching, diff, HTTP, /health, live section."""
 
 import logging
 from datetime import UTC, datetime, timedelta
@@ -363,21 +363,80 @@ async def test_job_alerts_and_persists_and_caches(env):
     assert len(env.bot.sent) == 1
 
 
-async def test_job_refreshes_live_only_when_events(env, monkeypatch):
-    calls = []
+def job_env(env, monkeypatch, *results):
+    """Run-able job context; returns (ctx, edits) where edits collects live caption edits."""
+    edits = []
+    monkeypatch.setattr(bot_mod, "render_flow", lambda *a, **k: b"\x89PNG")
 
-    async def fake_refresh(bot, bd, snap, only_chat=None):
-        calls.append(snap)
+    @real_bot_signatures
+    class B:
+        def __init__(self) -> None:
+            self.sent: list[tuple[int, str]] = []
 
-    monkeypatch.setattr(bot_mod, "refresh_live", fake_refresh)
-    env.bd["equipment"] = FakeMonitor(
-        result(chk("Lift", "up", uk="k")), result(chk("Lift", "down", uk="k"))
+        async def send_message(self, chat_id: int, text: str, **_: Any) -> None:
+            self.sent.append((chat_id, text))
+
+        async def edit_message_media(self, media, chat_id, message_id):
+            edits.append(media.caption)
+
+    env.storage.set_json("live_messages", {str(CHAT): 5})
+    env.storage.add_sample(snap())
+    env.bd["equipment"] = FakeMonitor(*results)
+    ctx = SimpleNamespace(application=SimpleNamespace(bot_data=env.bd), bot=B())
+    return ctx, edits
+
+
+async def test_refresh_first_fetch_refreshes(env, monkeypatch):
+    ctx, edits = job_env(env, monkeypatch, result(chk("Lift", "up", uk="k")))
+    await bot_mod.equipment_job(ctx)
+    assert len(edits) == 1 and "🟢 Lift" in edits[0]
+
+
+async def test_refresh_unchanged_statuses_do_not_refresh(env, monkeypatch):
+    ctx, edits = job_env(
+        env, monkeypatch, result(chk("Lift", "up", uk="k")), result(chk("Lift", "up", uk="k"))
     )
-    ctx = SimpleNamespace(application=SimpleNamespace(bot_data=env.bd), bot=env.bot)
     await bot_mod.equipment_job(ctx)
-    assert calls == []
     await bot_mod.equipment_job(ctx)
-    assert len(calls) == 1
+    assert len(edits) == 1
+
+
+async def test_refresh_status_change_refreshes(env, monkeypatch):
+    ctx, edits = job_env(
+        env, monkeypatch, result(chk("Lift", "up", uk="k")), result(chk("Lift", "grace", uk="k"))
+    )
+    await bot_mod.equipment_job(ctx)
+    await bot_mod.equipment_job(ctx)
+    assert len(edits) == 2 and "🟡 Lift" in edits[1]
+
+
+async def test_refresh_last_ping_change_alone_does_not_refresh(env, monkeypatch):
+    t1 = datetime(2026, 10, 10, 9, 0, tzinfo=UTC)
+    ctx, edits = job_env(
+        env,
+        monkeypatch,
+        result(chk("Lift", "up", uk="k", last=t1)),
+        result(chk("Lift", "up", uk="k", last=t1 + timedelta(minutes=5))),
+    )
+    await bot_mod.equipment_job(ctx)
+    await bot_mod.equipment_job(ctx)
+    assert len(edits) == 1
+
+
+async def test_refresh_once_per_run_with_events(env, monkeypatch):
+    ctx, edits = job_env(
+        env, monkeypatch, result(chk("Lift", "up", uk="k")), result(chk("Lift", "down", uk="k"))
+    )
+    await bot_mod.equipment_job(ctx)
+    await bot_mod.equipment_job(ctx)  # status change AND a down event: still one edit
+    assert len(edits) == 2
+    assert len(ctx.bot.sent) == 1
+
+
+async def test_refresh_first_fetch_with_event_once(env, monkeypatch):
+    ctx, edits = job_env(env, monkeypatch, result(chk("Lift", "down", uk="k")))
+    await bot_mod.equipment_job(ctx)
+    assert len(edits) == 1
 
 
 async def test_unmatched_warns_once_per_change_never_alerts(env, caplog):
@@ -504,37 +563,119 @@ def cap(res, lang="en"):
     return bot_mod.format_live_caption(snap(), lang, TZ, NOW, 20, 30, equipment=res)
 
 
-def test_live_line_all_ok_placed_before_data_line():
-    res = result(chk("A", "up"), chk("B", "grace"), chk("C", "started"), chk("D", "new"))
-    lines = cap(res).splitlines()
-    assert lines[-2] == "🩺 4/4 OK"
-    assert lines[-1].startswith("Data:")
+def sect(res, lang="en", budget=1000):
+    return bot_mod.equipment_section(res, lang, TZ, NOW, budget)
 
 
-def test_live_line_down_names_uk_and_exclusions():
-    res = result(
-        chk("A", "up"), chk("Ліфт", "down"), chk("Cam", "down"), chk("P", "paused"), extra=["x"]
+def all_status_result():
+    return result(
+        chk("Internet", "up"),
+        chk("Cams", "grace"),
+        chk("Lift", "down", last=datetime(2026, 10, 10, 9, 35, tzinfo=UTC)),
+        chk("Pump", "paused"),
+        chk("N", "new"),
+        chk("S", "started"),
+        extra=["ghost"],
     )
-    assert cap(res, "uk").splitlines()[-2] == "🩺 1/3 в нормі · 🔴 Ліфт, Cam"
-    assert "🩺 1/3 OK · 🔴 Ліфт, Cam" in cap(res)
 
 
-def test_live_line_absent_when_none_or_no_countable():
+def test_section_en_all_statuses_in_env_order():
+    assert sect(all_status_result()).splitlines() == [
+        "🩺 Equipment",
+        "🟢 Internet",
+        "🟡 Cams",
+        "🔴 Lift — down since 12:35",
+        "⏸ Pump",
+        "🆕 N",
+        "▶️ S",
+        "❓ ghost — not found",
+    ]
+
+
+def test_section_uk():
+    lines = sect(all_status_result(), "uk").splitlines()
+    assert lines[0] == "🩺 Обладнання"
+    assert lines[3] == "🔴 Lift — немає сигналу з 12:35"
+    assert lines[-1] == "❓ ghost — не знайдено"
+
+
+def test_section_down_time_date_prefix_and_null():
+    old = datetime(2026, 10, 8, 20, 5, tzinfo=UTC)  # 23:05 local
+    text = sect(result(chk("A", "down", last=old), chk("B", "down", last=None)))
+    assert "🔴 A — down since 08.10 23:05" in text
+    assert "🔴 B — down since —" in text
+
+
+def test_section_escapes_names():
+    text = sect(result(chk("<b>&", "down"), extra=["<x>"]))
+    assert "🔴 &lt;b&gt;&amp; — down" in text and "❓ &lt;x&gt; — not found" in text
+    assert "<b>" not in text
+
+
+def test_section_none_when_empty():
+    assert sect(FetchResult()) is None
+
+
+def test_caption_has_section_before_data_line_and_no_summary():
+    text = cap(result(chk("A", "up"), chk("B", "down")))
+    lines = text.splitlines()
+    assert lines[-1].startswith("Data:")
+    assert "🩺 Equipment\n🟢 A\n🔴 B — down since —\n\nData:" in text
+    assert "\n\n🩺 Equipment" in text
+    assert "OK ·" not in text and "1/2" not in text
+
+
+def test_caption_section_absent_when_none_or_empty():
     assert "🩺" not in cap(None)
-    assert "🩺" not in cap(result(chk("P", "paused"), extra=["x"]))
+    assert "🩺" not in cap(FetchResult())
 
 
-def test_live_line_truncated_under_1024():
-    res = result(*[chk(f"Very long equipment name number {i} " * 3, "down") for i in range(40)])
-    text = cap(res)
-    assert len(text) < 1024
-    line = text.splitlines()[-2]
-    assert line.startswith("🩺 0/40 OK · 🔴 ") and line.endswith("…")
-    assert len(cap(res, "uk")) < 1024
+def long_down(n=40, suffix=""):
+    return result(
+        *[chk(f"Very long equipment name number {i} " * 2 + suffix, "down") for i in range(n)]
+    )
 
 
-def test_live_line_truncation_with_stale_footer():
-    res = result(*[chk(f"Name {i} <&> " * 5, "down") for i in range(40)])
+def test_budget_many_long_names_under_1024_with_more_line():
+    for lang in ("en", "uk"):
+        text = cap(long_down(), lang)
+        assert len(text) < 1024
+        assert text.splitlines()[-3].startswith("… ")
+
+
+def test_budget_down_first_then_env_order_and_count():
+    res = result(
+        *[chk(f"up{i:02d} " + "x" * 30, "up") for i in range(20)],
+        chk("LIFT", "down"),
+        chk("PUMP", "down"),
+    )
+    text = sect(res, budget=300)
+    assert len(text) <= 300
+    lines = text.splitlines()
+    assert lines[1].startswith("🔴 LIFT") and lines[2].startswith("🔴 PUMP")
+    assert lines[3].startswith("🟢 up00") and lines[4].startswith("🟢 up01")
+    shown = len(lines) - 2
+    assert lines[-1] == f"… +{22 - shown}"
+    assert sect(res, "uk", budget=300).splitlines()[-1].startswith("… ще ")
+
+
+def test_budget_tiny_falls_back_to_summary():
+    res = result(chk("A", "up"), chk("Lift", "down"))
+    assert sect(res, budget=20) is None
+    room = len("🩺 1/2 OK · 🔴 Lift")
+    assert sect(res, budget=room) is None
+    assert bot_mod.equipment_line(res, "en", room) == "🩺 1/2 OK · 🔴 Lift"
+
+
+def test_caption_fallback_summary_in_full_caption(monkeypatch):
+    monkeypatch.setattr(bot_mod, "CAPTION_LIMIT", len(cap(None)) + 1 + 30)
+    text = cap(result(chk("A", "up"), chk("Lift", "down")))
+    assert text.splitlines()[-3] == "🩺 1/2 OK · 🔴 Lift"
+    assert len(text) < bot_mod.CAPTION_LIMIT
+
+
+def test_section_with_stale_footer_under_1024():
+    res = long_down(suffix="<&> ")
     s = Snapshot(NOW - timedelta(hours=3), 47, 5100, 2000, 100, 3200, BatteryState.CHARGING)
     assert len(bot_mod.format_live_caption(s, "en", TZ, NOW, 20, 30, equipment=res)) < 1024
 
@@ -555,7 +696,7 @@ async def test_refresh_live_uses_cache_only_when_enabled(env, monkeypatch):
     assert "🩺" not in seen[-1]
     env.bd["equipment"] = FakeMonitor()
     await bot_mod.refresh_live(B(), env.bd, snap())
-    assert "🩺 0/1 OK · 🔴 A" in seen[-1]
+    assert "🩺 Equipment\n🔴 A — down since —" in seen[-1]
 
 
 # ------------------------------------------------------------------ _post_init scheduling

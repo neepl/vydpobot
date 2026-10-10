@@ -141,6 +141,10 @@ MESSAGES: dict[Lang, dict[str, str]] = {
             "slugs) in .env and restart the bot."
         ),
         "live.equipment": "{ok}/{total} OK",
+        "live.equip_header": "Equipment",
+        "live.equip_down": "{name} — down since {time}",
+        "live.equip_not_found": "{name} — not found",
+        "live.equip_more": "… +{n}",
         "time.dur.min": "{n} minutes",
         "time.dur.min.one": "{n} minute",
         "time.dur.min.few": "{n} minutes",
@@ -267,6 +271,10 @@ MESSAGES: dict[Lang, dict[str, str]] = {
             "перевірок через кому) та перезапустіть бота."
         ),
         "live.equipment": "{ok}/{total} в нормі",
+        "live.equip_header": "Обладнання",
+        "live.equip_down": "{name} — немає сигналу з {time}",
+        "live.equip_not_found": "{name} — не знайдено",
+        "live.equip_more": "… ще {n}",
         "time.dur.min": "{n} хвилин",
         "time.dur.min.one": "{n} хвилину",
         "time.dur.min.few": "{n} хвилини",

@@ -383,6 +383,8 @@ a caption. The bot edits it on every poll, so it never needs a new `/status`.
   just refreshes the existing message. The `/live` command itself is deleted to keep the chat clean.
 - `/live off` (admin): unpins and deletes the message and stops updating it.
 - Works in the alert group and in other allowed chats; each chat has its own live message.
+- With building-equipment monitoring on, the caption also lists every monitored check with its
+  status (see "Building equipment" below).
 
 **Permission.** To pin, the bot needs one right in the group: Edit -> Administrators -> Add
 Admin -> @vydpo_bot, and enable ONLY "Pin Messages". Without it the bot still keeps the message
@@ -443,9 +445,15 @@ HEALTHCHECKS_CHECKS=internet, cameras, lift
 **`/health`** lists every configured entry with its status (🟢 up, 🟡 grace, 🔴 down, ⏸ paused,
 🆕 new, ▶️ started, ❓ not found), the last ping time and when it was checked.
 
-**Pinned live message.** When monitoring is on, the caption gets one extra line above the
-"Data" line, for example `🩺 3/4 OK · 🔴 Lift` (paused and unmatched checks are not counted).
-It also refreshes right after an equipment alert.
+**Pinned live message.** When monitoring is on, the caption gets an equipment section above the
+"Data" line: a `🩺 Equipment` header and one line per configured entry in `HEALTHCHECKS_CHECKS`
+order (status emoji and name). A down check also shows the time of its last signal (`🔴 Lift -
+down since 12:35`, with the date if not today); an unknown entry shows `❓ name - not found`.
+If the section would push the caption over Telegram's 1024-character limit, down checks are kept
+first, the rest follow in order, and the end reads `... +N`; if even one line does not fit, the
+old one-line summary (`🩺 3/4 OK · 🔴 Lift`) is used instead. The live message is refreshed on the
+first successful check after a start and whenever any check changes status (not on every ping),
+as well as right after an equipment alert, using stored data only.
 
 Keep Healthchecks' own notifications (email, Telegram, ...) switched on as a backup: they still
 reach you when the bot or the server it runs on is down.
