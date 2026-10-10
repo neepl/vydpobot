@@ -3,9 +3,10 @@
 import asyncio
 import html
 import logging
+import math
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -56,6 +57,7 @@ from vydpobot.solarman.portal import PortalAuthError
 from vydpobot.source import DataSource, make_source
 from vydpobot.storage import (
     KEY_ALERT_STATE,
+    KEY_API_BALANCE,
     KEY_EQUIPMENT_STATE,
     KEY_LANGUAGE,
     KEY_LIVE_MESSAGES,
@@ -487,16 +489,33 @@ def _save_state(storage: Storage, state: AlertState) -> None:
     storage.set_json(KEY_ALERT_STATE, state.to_dict())
 
 
+BALANCE_DAYS = 30  # warn when the remaining calls cover fewer days than this
+ON_DEMAND_MARGIN = 1.1  # 10% over the realtime base for on-demand device calls
+
+
 def expected_daily_calls(settings: Settings) -> int | None:
-    """Expected OpenAPI calls per day (realtime polls + device polls); None for other backends
-    or without a device SN."""
+    """Expected OpenAPI calls per day; None for other backends or without a device SN.
+
+    On-demand mode (DEVICE_POLL_S=0): the realtime base only; device calls add up to +1 per
+    poll while the grid shows no flow.
+    """
     if settings.solarman_backend != "openapi" or not settings.solarman_device_sn:
         return None
-    return 86400 // settings.poll_interval_s + 86400 // settings.device_poll_s
+    base = 86400 // settings.poll_interval_s
+    return base if settings.device_poll_s == 0 else base + 86400 // settings.device_poll_s
+
+
+def daily_rate(settings: Settings) -> int:
+    """Daily call rate used to judge the remaining balance (on-demand: base + 10% margin)."""
+    base = 86400 // settings.poll_interval_s
+    if settings.device_poll_s == 0:
+        return math.ceil(base * ON_DEMAND_MARGIN)
+    return base + (86400 // settings.device_poll_s if settings.solarman_device_sn else 0)
 
 
 def quota_warning(settings: Settings) -> str | None:
-    """Startup warning when the expected daily calls exceed 90% of the budget."""
+    """Startup warning when the expected daily calls exceed 90% of the budget (on-demand: the
+    base realtime count alone)."""
     expected = expected_daily_calls(settings)
     if expected is None or expected <= 0.9 * settings.solarman_daily_budget:
         return None
@@ -509,15 +528,60 @@ def quota_warning(settings: Settings) -> str | None:
 
 def _log_quota_plan(settings: Settings) -> None:
     if (expected := expected_daily_calls(settings)) is not None:
-        log.info(
-            "Expected Solarman API calls/day: %d (%d realtime + %d device) of budget %d",
-            expected,
-            86400 // settings.poll_interval_s,
-            86400 // settings.device_poll_s,
-            settings.solarman_daily_budget,
-        )
+        realtime = 86400 // settings.poll_interval_s
+        if settings.device_poll_s == 0:
+            log.info(
+                "Expected Solarman API calls/day: %d (realtime) of budget %d, plus up to +1 per "
+                "poll (max %d/day) while the grid shows no flow (device polled on demand, "
+                "at most every 5 min)",
+                expected,
+                settings.solarman_daily_budget,
+                realtime,
+            )
+        else:
+            log.info(
+                "Expected Solarman API calls/day: %d (%d realtime + %d device) of budget %d",
+                expected,
+                realtime,
+                86400 // settings.device_poll_s,
+                settings.solarman_daily_budget,
+            )
     if warning := quota_warning(settings):
         log.warning(warning)
+
+
+async def balance_once(bot_data: dict[str, Any], now: datetime) -> list[str]:
+    """Daily real-balance check (OpenAPI only). Returns admin notices; never raises.
+
+    Runs at most once per local day (last date and value persisted). One low-balance notice
+    per day when the remaining calls cover fewer than BALANCE_DAYS days at the current rate.
+    """
+    settings: Settings = bot_data["settings"]
+    source = bot_data["source"]
+    storage: Storage = bot_data["storage"]
+    if settings.solarman_backend != "openapi" or not hasattr(source, "balance"):
+        return []
+    try:
+        today = now.astimezone(settings.tz).date().isoformat()
+        st = storage.get_json(KEY_API_BALANCE) or {}
+        if st.get("date") == today:
+            return []
+        remaining = await source.balance()
+        if remaining is None:
+            return []
+        storage.set_json(
+            KEY_API_BALANCE, {"date": today, "remaining": remaining, "notified": False}
+        )
+        log.info("Solarman API calls remaining: %d", remaining)
+        rate = daily_rate(settings)
+        if remaining >= BALANCE_DAYS * rate:
+            return []
+        storage.set_json(KEY_API_BALANCE, {"date": today, "remaining": remaining, "notified": True})
+        text = t(get_lang(bot_data), "quota.balance_low", n=remaining, days=remaining // rate)
+        return [html.escape(text)]
+    except Exception:
+        log.exception("Balance check failed")
+        return []
 
 
 def latest_snapshot(bd: dict[str, Any]) -> Snapshot | None:
@@ -556,7 +620,11 @@ async def poll_once(bot_data: dict[str, Any], now: datetime) -> PollResult:
     quota = getattr(bot_data["source"], "quota", None)
     try:
         if quota is not None and (count := quota.take_notice()) is not None:
-            text = t(get_lang(bot_data), "quota.notice", count=count, budget=quota.budget)
+            lang = get_lang(bot_data)
+            text = t(lang, "quota.notice", count=count, budget=quota.budget)
+            known = (bot_data["storage"].get_json(KEY_API_BALANCE) or {}).get("remaining")
+            if known is not None:
+                text += " " + t(lang, "quota.remaining", n=known)
             result.admin_notices.append(html.escape(text))
     except Exception:
         log.exception("Quota notice failed")
@@ -1181,6 +1249,17 @@ async def poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.exception("Live refresh failed")
 
 
+async def balance_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    bd = context.application.bot_data
+    try:
+        notices = await balance_once(bd, datetime.now(UTC))
+        for chat_id in admin_targets(bd["settings"]) if notices else ():
+            for msg in notices:
+                await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.HTML)
+    except Exception:
+        log.exception("Balance job failed")
+
+
 async def equipment_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     bd = context.application.bot_data
     try:
@@ -1273,6 +1352,9 @@ async def _post_init(app: Application) -> None:
             first=EQUIPMENT_FIRST_S,
             name="equipment",
         )
+    if settings.solarman_backend == "openapi":
+        app.job_queue.run_daily(balance_job, time(0, 10, tzinfo=settings.tz), name="balance")
+        app.job_queue.run_once(balance_job, when=60, name="balance_startup")
     app.job_queue.run_once(_startup_refresh, when=3, name="live_startup")
     app.job_queue.run_repeating(prune_job, interval=timedelta(days=1), first=60, name="prune")
 

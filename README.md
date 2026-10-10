@@ -246,21 +246,32 @@ The free OpenAPI tier for Smart accounts allows at most 3 plants and 200 000 cal
 | Call | Cadence | Calls/day |
 | --- | --- | --- |
 | Station realtime | `POLL_INTERVAL_S` = 5 min | 288 |
-| Device grid status (`SOLARMAN_DEVICE_SN`) | `DEVICE_POLL_S` = 10 min | 144 |
-| **Total** | | **432/day, about 158k/year of 200k** |
+| Device grid status (`SOLARMAN_DEVICE_SN`), on demand | only while the grid shows no flow, at most every 5 min | 0 normally, up to +1 per poll |
+| Balance check | once per local day | 1 |
+| **Total** | | **about 289/day normally, about 105k/year of 200k** |
 
+- Device polling is **on demand** by default (`DEVICE_POLL_S=0`). The device call (grid voltage)
+  is made only when the station snapshot shows the grid with no flow (|grid| < 50 W), whatever
+  the battery is doing, so a sunny outage is checked too. While the grid flows it is evidently
+  online and no call is made. Set `DEVICE_POLL_S` to 300 or more for the old periodic polling
+  (for example 600 = 144 calls/day extra).
+- Once per local day the bot asks Solarman for the real number of calls left on the account
+  (`/account/v1.0/balance`, one call; OpenAPI backend only) and logs
+  `Solarman API calls remaining: N`. If N covers fewer than 30 days at the current rate
+  (on-demand: 288/day plus 10%), the admins get one notice that day. The last known value is
+  also shown in the 90% daily-budget notice. `vydpobot dump` prints it too.
 - `/status` and `/live` use no API calls: they show the latest poll result (or the newest stored
   sample after a restart).
 - `/graph` uses the stored samples first, when they cover the requested window (oldest sample
   within 15 min of the start, no gap over 30 min). Otherwise it fetches the API history once and
   stores those points, so later charts need no API call.
-- If an outage is suspected (grid idle while the battery discharges) the device data is
-  refreshed at once, at most every 5 min.
+- In periodic mode, an outage suspicion (grid idle while the battery discharges) refreshes the
+  device data at once, at most every 5 min.
 - The bot counts requests per local day (stored in the database). At 90% of
   `SOLARMAN_DAILY_BUDGET` (default 548) the admins get one notice per day; at 100% it skips
   device polls and history fetches, but never the realtime poll. The daily total is logged at
-  INFO when the day rolls over, and the expected daily calls are logged at startup (with a
-  warning above 90% of the budget).
+  INFO when the day rolls over, and the expected daily calls are logged at startup (in on-demand mode
+  the warning looks at the realtime base only).
 
 ## Telegram setup
 

@@ -131,6 +131,10 @@ MESSAGES: dict[Lang, dict[str, str]] = {
             "Solarman API usage: {count} of {budget} calls today. "
             "At 100% only realtime polls continue (no device or history calls)."
         ),
+        "quota.remaining": "Calls left on the account: {n}.",
+        "quota.balance_low": (
+            "⚠️ Solarman API: only {n} calls left (~{days} days at the current rate)"
+        ),
         "runtime.dur.hm": "{h} h {m} min",
         "runtime.dur.h": "{h} h",
         "runtime.dur.m": "{m} min",
@@ -275,6 +279,10 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "quota.notice": (
             "Використання API Solarman: {count} з {budget} запитів сьогодні. "
             "При 100% працюють лише запити поточних даних (без пристрою та історії)."
+        ),
+        "quota.remaining": "Залишилось запитів на акаунті: {n}.",
+        "quota.balance_low": (
+            "⚠️ API Solarman: залишилось лише {n} запитів (~{days} дн. за поточної витрати)"
         ),
         "runtime.dur.hm": "{h} год {m} хв",
         "runtime.dur.h": "{h} год",

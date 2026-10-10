@@ -90,3 +90,11 @@ async def test_token_request_sends_configured_hash_verbatim():
     body = json.loads(route.calls[0].request.content)
     assert body == {"appSecret": "sekret", "email": "me@example.com", "password": DIGEST}
     assert route.calls[0].request.url.params["appId"] == "app1"
+
+
+def test_device_poll_default_on_demand_and_minimum():
+    assert settings(solarman_password="p").device_poll_s == 0
+    assert settings(solarman_password="p", device_poll_s=300).device_poll_s == 300
+    for bad in (1, 299, -5):
+        with pytest.raises(ValidationError):
+            settings(solarman_password="p", device_poll_s=bad)

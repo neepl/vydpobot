@@ -16,7 +16,7 @@ import httpx
 from vydpobot.config import Settings
 from vydpobot.models import BATTERY_DEADBAND_W, HistoryPoint, Snapshot, battery_state
 from vydpobot.quota import ApiQuota
-from vydpobot.runtime import on_battery
+from vydpobot.runtime import GRID_IDLE_W, on_battery
 from vydpobot.storage import Storage
 
 log = logging.getLogger(__name__)
@@ -232,7 +232,7 @@ class SolarmanClient:
         tz: ZoneInfo,
         invert_battery_sign: bool = False,
         invert_grid_sign: bool = False,
-        device_poll_s: float = 600.0,
+        device_poll_s: float = 0,
         quota: ApiQuota | None = None,
         http: httpx.AsyncClient | None = None,
     ):
@@ -257,7 +257,10 @@ class SolarmanClient:
         self._token_lock = asyncio.Lock()
         self._auth_failures = 0
         self._auth_retry_at = 0.0
+        # 0 = on demand: the device is called only while the station shows no grid flow
         self._device_poll_s = device_poll_s
+        self._on_demand = device_poll_s <= 0
+        self._cache_ttl = 2 * (device_poll_s if device_poll_s > 0 else OUTAGE_REFRESH_S)
         self.quota = quota
         # last successful device poll: (monotonic time, online, voltages)
         self._grid_cache: tuple[float, bool | None, tuple[float, ...] | None] | None = None
@@ -397,6 +400,19 @@ class SolarmanClient:
     async def device_current_raw(self, device_sn: str) -> dict:
         return await self._call("/device/v1.0/currentData", {"deviceSn": device_sn})
 
+    async def balance(self) -> int | None:
+        """Remaining API calls of the account (costs one call); None when unavailable."""
+        try:
+            data = await self._call("/account/v1.0/balance", {"appId": self._app_id})
+        except SolarmanError as e:
+            log.warning("Solarman balance request failed: %s", e)
+            return None
+        total = _num(data.get("total"))
+        if total is None:
+            log.warning("Solarman balance response has no usable total")
+            return None
+        return int(total)
+
     async def station_history_raw(self, station_id: int, day: date) -> list[dict]:
         d = day.isoformat()
         body = {"stationId": station_id, "startTime": d, "endTime": d, "timeType": 1}
@@ -416,6 +432,7 @@ class SolarmanClient:
             out["device_snapshot_per_inverter"] = dataclasses.asdict(dev)
             online, volts, status = grid_state_from_device(raw)
             out["grid_state"] = {"online": online, "voltages": volts, "status": status}
+        out["api_calls_remaining"] = await self.balance()
         if history:
             items = await self.station_history_raw(station_id, datetime.now(self._tz).date())
             out["history_item_count"] = len(items)
@@ -445,16 +462,24 @@ class SolarmanClient:
         )
         if not device_sn:
             return station
+        if self._on_demand:
+            grid = station.grid_w
+            if grid is None:
+                return replace(station, grid_online=None, grid_voltage_v=None)
+            if abs(grid) >= GRID_IDLE_W:
+                # power flows through the grid line, so it is online; drop any offline state
+                self._grid_cache = None
+                return replace(station, grid_online=True, grid_voltage_v=None)
         await self._maybe_poll_device(device_sn, station)
         online, volts = self._grid_state()
         return replace(station, grid_online=online, grid_voltage_v=volts)
 
     def _grid_state(self) -> tuple[bool | None, tuple[float, ...] | None]:
-        """Cached grid state while fresher than 2x device_poll_s, else (None, None)."""
+        """Cached grid state while fresher than 2x the poll period, else (None, None)."""
         if self._grid_cache is None:
             return None, None
         at, online, volts = self._grid_cache
-        if _monotonic() - at > 2 * self._device_poll_s:
+        if _monotonic() - at > self._cache_ttl:
             return None, None
         return online, volts
 
@@ -463,7 +488,11 @@ class SolarmanClient:
         if self.quota is not None and self.quota.exhausted:
             return  # non-essential call; skipped at 100% of the daily budget
         last = self._grid_attempt_at
-        if last is None or now - last >= self._device_poll_s:
+        if self._on_demand:
+            # only called with an idle grid line (see get_snapshot)
+            if last is not None and now - last < OUTAGE_REFRESH_S:
+                return
+        elif last is None or now - last >= self._device_poll_s:
             pass
         elif on_battery(station) and now - last >= OUTAGE_REFRESH_S:
             # Looks like an outage: confirm quickly unless a fresh "offline" is already cached.

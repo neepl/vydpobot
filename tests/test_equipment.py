@@ -713,12 +713,16 @@ def _post_init_env(env, monkeypatch, tmp_path, **kw):
     s.healthchecks_checks = ["internet"]
     s.healthchecks_api_url = "https://healthchecks.io"
     s.poll_interval_s = 600
+    s.solarman_backend = "openapi"
     monkeypatch.setattr(bot_mod, "make_source", lambda *a, **k: object())
     monkeypatch.setattr(bot_mod, "_log_quota_plan", lambda s: None)
     jobs = []
 
     class JQ:
         def run_once(self, cb, when, **kw):
+            pass
+
+        def run_daily(self, cb, time, **kw):
             pass
 
         def run_repeating(self, cb, **kw):

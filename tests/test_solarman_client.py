@@ -392,7 +392,7 @@ async def test_resolve_no_stations(respx_mock, client):
 
 
 @respx.mock(assert_all_called=False)
-async def test_get_snapshot_never_merges_device_powers(respx_mock, client):
+async def test_get_snapshot_never_merges_device_powers(respx_mock):
     """Device data is one inverter's share (load 2185 W vs the plant's 6542 W): only the
     grid flag is taken from it."""
     mock_token(respx_mock)
@@ -402,7 +402,17 @@ async def test_get_snapshot_never_merges_device_powers(respx_mock, client):
     cur = respx_mock.post(f"{BASE}/device/v1.0/currentData").mock(
         return_value=httpx.Response(200, json=fx("openapi_device_current_real"))
     )
+    client = SolarmanClient(
+        base_url=BASE,
+        app_id="app1",
+        app_secret="sekret",
+        email="me@example.com",
+        password="hunter2",
+        tz=TZ,
+        device_poll_s=600,
+    )
     snap = await client.get_snapshot(1, "INV0000003")
+    await client.aclose()
     assert json.loads(cur.calls[0].request.content) == {"deviceSn": "INV0000003"}
     assert (snap.soc, snap.load_w, snap.pv_w, snap.grid_w, snap.battery_w) == (
         100.0,
@@ -563,12 +573,17 @@ async def test_raw_debug(respx_mock, client):
     respx_mock.post(f"{BASE}/device/v1.0/currentData").mock(
         return_value=httpx.Response(200, json=fx("device_current"))
     )
+    respx_mock.post(f"{BASE}/account/v1.0/balance").mock(
+        return_value=httpx.Response(200, json={"success": True, "total": 1234})
+    )
     only_station = await client.raw_debug(1)
-    assert set(only_station) == {"station_realtime"}
+    assert set(only_station) == {"station_realtime", "api_calls_remaining"}
+    assert only_station["api_calls_remaining"] == 1234
     both = await client.raw_debug(1, "SN1")
     assert set(both) == {
         "station_realtime",
         "device_current",
         "device_snapshot_per_inverter",
         "grid_state",
+        "api_calls_remaining",
     }

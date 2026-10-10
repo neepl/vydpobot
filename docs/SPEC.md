@@ -97,19 +97,32 @@ voltages < 50 V and frequency (if known) < 5 Hz; else None (also None without ke
 `Snapshot.grid_online` / `grid_voltage_v` carry it (None on the portal backend).
 
 `get_snapshot(station_id, device_sn)`: station realtime only for the plant values. With a
-`device_sn`, the device call runs at most every `device_poll_s` (setting, default 600, min 300);
-the last grid state is cached with its time and attached while younger than 2x `device_poll_s`,
-else `None`. If the station data looks like an outage (|grid_w| < 50 and battery discharging)
-and the cache says online or is older than 5 min, the device is refreshed at once (at most once
-per 5 min). A failed device call is logged and leaves the snapshot's grid state unknown.
+`device_sn`, `device_poll_s` selects the mode (0 = on demand, the default; otherwise >= 300).
+On demand: `grid_w is None` -> no device call, `grid_online=None`; `|grid_w| >= 50` -> no call,
+`grid_online=True`, `grid_voltage_v=None`, cached offline state cleared (instant recovery); else
+(grid idle, any battery direction) the device is called at most once per 300 s and the cached
+state is attached while younger than 2 x 300 s. Periodic mode: the device call runs at most every
+`device_poll_s`, the cached state is attached while younger than 2x `device_poll_s`, and an
+outage suspicion (|grid_w| < 50 and battery discharging) refreshes it at once (max once per
+5 min). At 100% of the budget the device call is skipped (state stays unknown, the runtime
+heuristic applies). A failed device call is logged and leaves the grid state unknown.
+
+`SolarmanClient.balance()`: `POST /account/v1.0/balance` with `{"appId": app_id}` returns the
+remaining calls (`total`), or None on failure; it counts in the quota. `bot.balance_once` runs it
+once per local day (JobQueue: daily 00:10 plus ~60 s after startup; date and value persisted in
+Storage key `api_balance`), logs `Solarman API calls remaining: N` and sends one admin notice
+(`quota.balance_low`) when N < 30 days x daily rate (on demand: 288 + 10%). The 90% budget
+notice appends the last known value. OpenAPI backend only; `dump` prints it as
+`api_calls_remaining`.
 
 API accounting (`quota.py`, `ApiQuota`): every Solarman HTTP request (token requests and retries
 included) increments a per-local-day counter persisted in Storage (`api_calls`:
 `{date, count, notified}`). `SOLARMAN_DAILY_BUDGET` (default 548): at 90% `poll_once` adds one
 admin notice per day; at 100% device polls and `/graph` history fetches are skipped (the realtime
 poll never is). The daily total is logged at INFO on day rollover. Startup logs the expected
-calls/day (`86400/poll_interval_s + 86400/device_poll_s` with a device SN) and warns above 90% of
-the budget.
+calls/day (on demand: `86400/poll_interval_s` plus up to +1 per poll while the grid shows no
+flow; periodic: `+ 86400/device_poll_s`) and warns above 90% of the budget (on demand: the
+realtime base alone).
 
 ## __main__.py (Agent A)
 

@@ -44,8 +44,9 @@ class Settings(BaseSettings):
     solarman_station_id: int | None = None  # None -> first station on the account
     # Master inverter SN; used ONLY for grid status (voltage/frequency), never for plant totals.
     solarman_device_sn: str | None = None
-    # Device (grid status) call cadence, seconds. Quota: each call counts against the daily budget.
-    device_poll_s: int = Field(default=600, ge=300)
+    # Device (grid status) call cadence, seconds. 0 = on demand: only while the station shows no
+    # grid flow, at most every 5 min. Otherwise periodic, >= 300. Each call counts in the quota.
+    device_poll_s: int = Field(default=0)
     # Solarman OpenAPI calls per day (free tier); 90% -> admin notice, 100% -> only realtime polls.
     solarman_daily_budget: int = Field(default=548, ge=1)
     # Set True if Solarman's batteryPower sign is reversed for your setup
@@ -93,6 +94,13 @@ class Settings(BaseSettings):
     def _split_ids(cls, v: object) -> object:
         if isinstance(v, str):
             return [int(x) for x in v.replace(" ", "").split(",") if x]
+        return v
+
+    @field_validator("device_poll_s")
+    @classmethod
+    def _check_device_poll(cls, v: int) -> int:
+        if v != 0 and v < 300:
+            raise ValueError("DEVICE_POLL_S must be 0 (on demand) or at least 300")
         return v
 
     @field_validator("healthchecks_checks", mode="before")

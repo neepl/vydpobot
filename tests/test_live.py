@@ -434,6 +434,7 @@ async def test_live_passes_checked_at(env, monkeypatch):
 
 async def test_post_init_schedules_startup_refresh(env, monkeypatch, tmp_path):
     env.bd["settings"].db_path = tmp_path / "p.db"
+    env.bd["settings"].solarman_backend = "openapi"
     monkeypatch.setattr(bot_mod, "make_source", lambda *a, **k: object())
     monkeypatch.setattr(bot_mod, "_log_quota_plan", lambda s: None)
     once, repeating = [], []
@@ -441,6 +442,9 @@ async def test_post_init_schedules_startup_refresh(env, monkeypatch, tmp_path):
     class JQ:
         def run_once(self, cb, when, **kw):
             once.append((cb, when))
+
+        def run_daily(self, cb, time, **kw):
+            pass
 
         def run_repeating(self, cb, **kw):
             repeating.append(cb)
@@ -451,6 +455,7 @@ async def test_post_init_schedules_startup_refresh(env, monkeypatch, tmp_path):
 
     app = SimpleNamespace(bot_data={"settings": env.bd["settings"]}, bot=B(), job_queue=JQ())
     await bot_mod._post_init(app)
+    once = [o for o in once if o[0] is not bot_mod.balance_job]
     assert len(once) == 1 and once[0][1] <= 5
     app.bot_data["storage"].close()
     # the scheduled job refreshes from the latest stored sample

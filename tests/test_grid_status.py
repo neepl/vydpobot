@@ -237,8 +237,12 @@ async def test_dump_history_sample(respx_mock):
     respx_mock.post(f"{BASE}/station/v1.0/history").mock(
         return_value=httpx.Response(200, json=fx("station_history"))
     )
+    respx_mock.post(f"{BASE}/account/v1.0/balance").mock(
+        return_value=httpx.Response(200, json={"success": True, "total": 99})
+    )
     c = make_client()
     out = await c.raw_debug(1, SN, history=True)
+    assert out["api_calls_remaining"] == 99
     assert out["history_item_count"] == 3 and out["history_item_sample"]["dateTime"]
     assert out["grid_state"]["online"] is True
     await c.aclose()
@@ -324,4 +328,135 @@ async def test_budget_exhausted_skips_device_but_not_realtime(respx_mock, clock,
     s = await c.get_snapshot(1, SN)
     assert rt.call_count == 2 and cur.call_count == 1
     assert s.pv_w == 1164.0
+    await c.aclose()
+
+
+# ---------------------------------------------------------------- on-demand mode (default)
+
+FLOWING = fx("openapi_station_realtime_real")  # grid imports 5306 W
+IDLE = FLOWING | {"purchasePower": 0.0, "wirePower": 0.0}  # grid 0, battery charging (sunny)
+NO_GRID = FLOWING | {"purchasePower": None, "gridPower": None}
+
+
+@respx.mock(assert_all_called=False)
+async def test_on_demand_grid_flowing_no_device_call(respx_mock, clock):
+    _, cur = routes(respx_mock)
+    c = make_client(device_poll_s=0)
+    for _ in range(3):
+        s = await c.get_snapshot(1, SN)
+        clock[0] += 400
+        assert s.grid_online is True and s.grid_voltage_v is None
+    assert cur.call_count == 0
+    await c.aclose()
+
+
+@respx.mock(assert_all_called=False)
+async def test_on_demand_idle_grid_rate_limited(respx_mock, clock):
+    _, cur = routes(respx_mock, station=OUTAGE_STATION, dev=outage_device())
+    c = make_client(device_poll_s=0)
+    s = await c.get_snapshot(1, SN)
+    assert cur.call_count == 1 and s.grid_online is False
+    clock[0] += 299
+    s = await c.get_snapshot(1, SN)
+    assert cur.call_count == 1 and s.grid_online is False  # cached
+    clock[0] += 1
+    await c.get_snapshot(1, SN)
+    assert cur.call_count == 2
+    await c.aclose()
+
+
+@respx.mock(assert_all_called=False)
+async def test_on_demand_sunny_outage_with_charging_battery(respx_mock, clock):
+    _, cur = routes(respx_mock, station=IDLE, dev=outage_device())
+    c = make_client(device_poll_s=0)
+    s = await c.get_snapshot(1, SN)
+    assert s.battery_state is BatteryState.CHARGING and s.grid_w == 0
+    assert cur.call_count == 1 and s.grid_online is False
+    assert s.grid_voltage_v == (0.0, 0.0, 0.0)
+    await c.aclose()
+
+
+@respx.mock(assert_all_called=False)
+async def test_on_demand_grid_returns_without_device_call(respx_mock, clock):
+    rt, cur = routes(respx_mock, station=IDLE, dev=outage_device())
+    c = make_client(device_poll_s=0)
+    assert (await c.get_snapshot(1, SN)).grid_online is False
+    rt.mock(return_value=httpx.Response(200, json=FLOWING))
+    clock[0] += 60
+    s = await c.get_snapshot(1, SN)
+    assert s.grid_online is True and cur.call_count == 1
+    # idle again within 5 min of the last call: the stale offline state must not come back
+    rt.mock(return_value=httpx.Response(200, json=IDLE))
+    clock[0] += 60
+    s = await c.get_snapshot(1, SN)
+    assert cur.call_count == 1 and s.grid_online is None
+    await c.aclose()
+
+
+@respx.mock(assert_all_called=False)
+async def test_on_demand_grid_unknown_no_call(respx_mock, clock):
+    _, cur = routes(respx_mock, station=NO_GRID)
+    c = make_client(device_poll_s=0)
+    s = await c.get_snapshot(1, SN)
+    assert s.grid_w is None and s.grid_online is None and cur.call_count == 0
+    await c.aclose()
+
+
+@respx.mock(assert_all_called=False)
+async def test_on_demand_budget_exhausted_skips_device(respx_mock, clock, storage):
+    _, cur = routes(respx_mock, station=OUTAGE_STATION, dev=outage_device())
+    c = make_client(storage, budget=2, device_poll_s=0)
+    s = await c.get_snapshot(1, SN)  # token + realtime = 2 of 2
+    assert c.quota.exhausted and cur.call_count == 0 and s.grid_online is None
+    await c.aclose()
+
+
+@respx.mock(assert_all_called=False)
+async def test_on_demand_outage_detected_then_heuristic_suppressed(respx_mock, clock):
+    from vydpobot.runtime import outage_active
+
+    rt, cur = routes(respx_mock, station=OUTAGE_STATION, dev=outage_device())
+    c = make_client(device_poll_s=0)
+    s = await c.get_snapshot(1, SN)
+    assert outage_active(s, [])  # device 0 V, no flap guard needed
+    cur.mock(return_value=httpx.Response(200, json=fx("openapi_device_current_real")))
+    clock[0] += 301
+    s = await c.get_snapshot(1, SN)  # device now sees the grid: heuristic suppressed
+    assert s.grid_online is True and not outage_active(s, [])
+    await c.aclose()
+
+
+# ---------------------------------------------------------------- balance
+
+
+def mock_balance(router, body):
+    return router.post(f"{BASE}/account/v1.0/balance").mock(
+        return_value=httpx.Response(200, json=body)
+    )
+
+
+@respx.mock(assert_all_called=False)
+async def test_balance_request_shape_and_parse(respx_mock, clock, storage):
+    routes(respx_mock)
+    route = mock_balance(respx_mock, {"code": None, "success": True, "total": 41234})
+    c = make_client(storage)
+    assert await c.balance() == 41234
+    req = route.calls[0].request
+    assert json.loads(req.content) == {"appId": "a"}
+    assert req.headers["Authorization"].lower().startswith("bearer ")
+    assert req.url.params["language"] == "en"
+    assert c.quota.count == 2  # token + balance
+    await c.aclose()
+
+
+@respx.mock(assert_all_called=False)
+async def test_balance_failure_returns_none_and_logs(respx_mock, clock, caplog):
+    routes(respx_mock)
+    mock_balance(respx_mock, {"success": False, "msg": "denied", "code": "2101001"})
+    c = make_client()
+    with caplog.at_level(logging.WARNING, logger=client_mod.log.name):
+        assert await c.balance() is None
+    assert "balance request failed" in caplog.text
+    mock_balance(respx_mock, {"success": True})
+    assert await c.balance() is None
     await c.aclose()

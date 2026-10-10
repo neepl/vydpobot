@@ -260,6 +260,103 @@ def test_quota_warning() -> None:
     assert bot_mod.quota_warning(cfg(solarman_device_sn=None)) is None  # type: ignore[arg-type]
     assert bot_mod.expected_daily_calls(cfg(solarman_device_sn=None)) is None  # type: ignore[arg-type]
     assert bot_mod.quota_warning(cfg(solarman_backend="portal")) is None  # type: ignore[arg-type]
+    # on-demand mode: the realtime base alone is the expected count
+    assert bot_mod.expected_daily_calls(cfg(device_poll_s=0)) == 288  # type: ignore[arg-type]
+    assert bot_mod.quota_warning(cfg(device_poll_s=0)) is None  # type: ignore[arg-type]
+    assert bot_mod.quota_warning(cfg(device_poll_s=0, solarman_daily_budget=300)) is not None  # type: ignore[arg-type]
+    assert bot_mod.daily_rate(cfg(device_poll_s=0)) == 317  # type: ignore[arg-type]  # 288 + 10%
+    assert bot_mod.daily_rate(cfg()) == 432  # type: ignore[arg-type]
+
+
+def test_quota_plan_log_both_modes(caplog) -> None:
+    base = {
+        "solarman_backend": "openapi",
+        "solarman_device_sn": "SN",
+        "poll_interval_s": 300,
+        "solarman_daily_budget": 548,
+    }
+    with caplog.at_level("INFO", logger=bot_mod.log.name):
+        bot_mod._log_quota_plan(SimpleNamespace(**base, device_poll_s=0))  # type: ignore[arg-type]
+        bot_mod._log_quota_plan(SimpleNamespace(**base, device_poll_s=600))  # type: ignore[arg-type]
+    msgs = [r.getMessage() for r in caplog.records]
+    assert "288 (realtime) of budget 548, plus up to +1 per poll" in msgs[0]
+    assert "432 (288 realtime + 144 device)" in msgs[1]
+
+
+class BalanceSource(FakeClient):
+    def __init__(self, values) -> None:
+        super().__init__()
+        self.values = list(values)
+        self.calls = 0
+
+    async def balance(self):
+        self.calls += 1
+        return self.values.pop(0)
+
+
+@pytest.fixture
+def bal(bd):
+    s = bd["settings"]
+    s.solarman_backend = "openapi"
+    s.device_poll_s = 0
+    s.tz = TZ
+    s.admin_user_ids = [1]
+    return bd
+
+
+async def test_balance_once_per_day_and_persisted(bal, caplog) -> None:
+    bal["source"] = BalanceSource([50000, 49000])
+    with caplog.at_level("INFO", logger=bot_mod.log.name):
+        assert await bot_mod.balance_once(bal, NOW) == []
+    assert "Solarman API calls remaining: 50000" in caplog.text
+    assert await bot_mod.balance_once(bal, NOW + timedelta(hours=3)) == []
+    assert bal["source"].calls == 1  # same local day: no recheck (also after a restart)
+    assert bal["storage"].get_json(bot_mod.KEY_API_BALANCE)["remaining"] == 50000
+    await bot_mod.balance_once(bal, NOW + timedelta(days=1))
+    assert bal["source"].calls == 2
+
+
+async def test_balance_failure_not_persisted(bal) -> None:
+    bal["source"] = BalanceSource([None, 40000])
+    assert await bot_mod.balance_once(bal, NOW) == []
+    assert bal["storage"].get_json(bot_mod.KEY_API_BALANCE) is None
+    await bot_mod.balance_once(bal, NOW)
+    assert bal["source"].calls == 2  # retried
+
+
+async def test_balance_low_notice_once_per_day_en_uk(bal) -> None:
+    bal["source"] = BalanceSource([5000, 4000, 4000])
+    (msg,) = await bot_mod.balance_once(bal, NOW)  # 5000 < 30 * 317 = 9510
+    assert "5000" in msg and "15 days" in msg and "Solarman" in msg
+    assert await bot_mod.balance_once(bal, NOW) == []  # once per day
+    bal["storage"].set_json(bot_mod.KEY_LANGUAGE, "uk")
+    (msg,) = await bot_mod.balance_once(bal, NOW + timedelta(days=1))
+    assert "4000" in msg and "залишилось" in msg
+
+
+async def test_balance_not_low_no_notice(bal) -> None:
+    bal["source"] = BalanceSource([9510])
+    assert await bot_mod.balance_once(bal, NOW) == []
+
+
+async def test_balance_skipped_for_portal(bal) -> None:
+    bal["settings"].solarman_backend = "portal"
+    bal["source"] = BalanceSource([1])
+    assert await bot_mod.balance_once(bal, NOW) == []
+    assert bal["source"].calls == 0
+
+
+async def test_quota_notice_includes_known_remaining(bal) -> None:
+    from vydpobot.quota import ApiQuota
+
+    bal["storage"].set_json(bot_mod.KEY_API_BALANCE, {"date": "x", "remaining": 12345})
+    quota = ApiQuota(bal["storage"], TZ, 10)
+    bal["source"].quota = quota
+    bal["source"].queue = [snap(ts=at(0))]
+    for _ in range(9):
+        quota.record()
+    (notice,) = (await poll_once(bal, at(0))).admin_notices
+    assert "9" in notice and "12345" in notice
 
 
 async def test_poll_caches_latest_snapshot(bd) -> None:
