@@ -1,4 +1,4 @@
-"""CLI: run | discover | dump | portal-probe."""
+"""CLI: run | discover | dump | portal-probe | preview."""
 
 import argparse
 import asyncio
@@ -11,7 +11,9 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from vydpobot.bot import DEFAULT_GRAPH_HOURS, MAX_GRAPH_HOURS
 from vydpobot.config import Settings, get_settings
+from vydpobot.i18n import SUPPORTED
 from vydpobot.solarman import PortalClient
 from vydpobot.source import DataSource, make_source
 from vydpobot.storage import Storage
@@ -34,6 +36,21 @@ def _parser() -> argparse.ArgumentParser:
     )
     pp.add_argument("--station-id", type=int)
     pp.add_argument("--out", type=Path, help="write the report to FILE instead of stdout")
+    pv = sub.add_parser(
+        "preview", help="dry run of one bot cycle (no Telegram, the bot's database is untouched)"
+    )
+    pv.add_argument("--out", type=Path, default=Path("preview"), help="output directory")
+    pv.add_argument("--lang", choices=SUPPORTED, help="default: the effective bot language")
+    pv.add_argument(
+        "--hours",
+        type=int,
+        default=DEFAULT_GRAPH_HOURS,
+        choices=range(1, MAX_GRAPH_HOURS + 1),
+        metavar=f"1..{MAX_GRAPH_HOURS}",
+        help="graph window (default %(default)s)",
+    )
+    pv.add_argument("--no-graph", action="store_true", help="skip the graph (may cost API calls)")
+    pv.add_argument("--no-equipment", action="store_true", help="skip healthchecks.io")
     return p
 
 
@@ -116,6 +133,21 @@ def main() -> None:
             asyncio.run(discover(settings))
         case "dump":
             asyncio.run(dump(settings, args.station_id, args.device_sn, args.history))
+        case "preview":
+            from vydpobot.preview import run_preview
+
+            report, code = asyncio.run(
+                run_preview(
+                    settings,
+                    args.out,
+                    lang=args.lang,
+                    hours=args.hours,
+                    graph=not args.no_graph,
+                    equipment=not args.no_equipment,
+                )
+            )
+            print(report, end="")
+            raise SystemExit(code)
         case "portal-probe":
             report = asyncio.run(portal_probe(settings, args.station_id))
             if args.out:

@@ -1326,6 +1326,17 @@ def _commands(lang: Lang) -> list[BotCommand]:
     return [BotCommand(c, desc[c]) for c in COMMANDS]
 
 
+def make_equipment(settings: Settings) -> EquipmentMonitor | None:
+    """The healthchecks.io monitor when configured, else None."""
+    if not getattr(settings, "healthchecks_enabled", False):
+        return None
+    return EquipmentMonitor(
+        settings.healthchecks_api_url,
+        settings.healthchecks_api_key.get_secret_value(),
+        settings.healthchecks_checks,
+    )
+
+
 async def _post_init(app: Application) -> None:
     settings: Settings = app.bot_data["settings"]
     storage = Storage(settings.db_path)
@@ -1333,13 +1344,7 @@ async def _post_init(app: Application) -> None:
     _log_quota_plan(settings)
     if warning := equipment_config_warning(settings):
         log.warning(warning)
-    equipment = None
-    if getattr(settings, "healthchecks_enabled", False):
-        equipment = EquipmentMonitor(
-            settings.healthchecks_api_url,
-            settings.healthchecks_api_key.get_secret_value(),
-            settings.healthchecks_checks,
-        )
+    equipment = make_equipment(settings)
     app.bot_data["equipment"] = equipment
     await app.bot.set_my_commands(_commands("en"))
     await app.bot.set_my_commands(_commands("uk"), language_code="uk")

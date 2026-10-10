@@ -311,6 +311,33 @@ cp .env.example .env   # then edit; every variable is documented inside
 `REARM_HYSTERESIS_PCT` (default 5) has a minimum of 2: SOC must rise this many points above
 the threshold before the alert cycle resets (SOC readings jitter by about 1 %).
 
+## Dry run before deploying
+
+```bash
+uv run vydpobot preview [--out DIR] [--lang en|uk] [--hours N] [--no-graph] [--no-equipment]
+```
+
+Runs one full bot cycle on your machine and shows what the bot would do, without Telegram:
+
+- **Prints** (HTML stripped, emojis kept): the normalized snapshot with `grid_online` and the
+  voltages, the `/status` text, the pinned live caption with its length against the 1024
+  limit, the alerts that would be sent (or `none`), the `/health` text, the runtime context
+  (outage, estimate, battery capacity used and whether it is configured or learned) and the
+  Solarman API calls used.
+- **Writes** to `--out` (default `./preview`): `status_flow.png`, `live_flow.png`,
+  `graph_{hours}h.png` (`--hours` 1..48, default 24) and `report.txt` (the same text as the
+  terminal). The absolute paths are listed at the end.
+
+A failing step (for example healthchecks.io being down) is shown as an error in its section and
+the rest still runs. The exit code is 0 if the Solarman poll succeeded, 1 if it failed.
+
+Cost: 1 to 3 Solarman API calls (the realtime call, a device call when the grid shows no flow,
+and the history call of the graph when the local samples do not cover the window; skip it with
+`--no-graph`). It sends nothing to Telegram and works on a temporary copy of `DB_PATH` (with its
+`-wal`/`-shm` files), which is deleted afterwards. The one exception is the portal backend: its
+refresh token is single-use, so if the preview renews it, the new token (and only that) is written
+back to the real database. Otherwise the bot would be left with a dead token.
+
 ## Local development
 
 Requires [uv](https://docs.astral.sh/uv/). The project uses its own `.venv`.

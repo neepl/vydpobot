@@ -23,7 +23,7 @@ src/vydpobot/
   storage.py           Agent B   sqlite3 (stdlib)
   charts.py            Agent B   matplotlib -> PNG bytes
   solarman/client.py   Agent A   async httpx client + normalization
-  __main__.py          Agent A   CLI: run | discover | dump
+  __main__.py          Agent A   CLI: run | discover | dump | portal-probe | preview
   bot.py               Agent C   python-telegram-bot v21 Application, handlers, jobs
 Dockerfile, compose.yaml, .env.example, README.md   Agent C
 ```
@@ -387,6 +387,13 @@ bot.py and `__main__.py` use only `make_source`/`DataSource`.
 - `discover`, `dump` work for both backends via `DataSource`.
 - `vydpobot portal-probe [--out FILE]`: renew token, list stations, device list, station detail, fast/system, try
   history candidates; write scrubbed JSON (tokens removed) to stdout/FILE for the user to share.
+
+- `vydpobot preview [--out DIR] [--lang en|uk] [--hours N] [--no-graph] [--no-equipment]`: dry run of
+  one bot cycle on a temporary copy of the DB (incl. -wal/-shm), no Telegram. One `poll_once`, one
+  `equipment_once`; prints snapshot, /status, live caption (+length vs 1024), would-be alerts,
+  /health, runtime context and Solarman calls used; writes `status_flow.png`, `live_flow.png`,
+  `graph_{hours}h.png`, `report.txt` to `--out` (default `./preview`). Step errors are printed and
+  the rest continues; exit 0 if the Solarman poll succeeded, else 1. Code: `preview.py`.
 
 ### Quota note (OpenAPI)
 Free tier for Smart accounts: <=3 plants, <=200 000 calls/year (~548/day). Realtime every 5 min
