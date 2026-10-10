@@ -13,7 +13,8 @@ matplotlib.use("Agg")
 
 import matplotlib.dates as mdates  # noqa: E402
 from matplotlib.axes import Axes  # noqa: E402
-from matplotlib.figure import Figure  # noqa: E402
+from matplotlib.figure import Figure
+from matplotlib.ticker import MaxNLocator  # noqa: E402
 
 from vydpobot.i18n import Lang, fmt_when, month_name, t  # noqa: E402
 from vydpobot.models import DayStats, HistoryPoint  # noqa: E402
@@ -277,7 +278,8 @@ def render_month_chart(
     today = (now or datetime.now(tz)).astimezone(tz).date()
     n = calendar.monthrange(year, month)[1]
     by_day = {d.day.day: d for d in days if (d.day.year, d.day.month) == (year, month)}
-    fig = Figure(figsize=(12, 8), dpi=100, facecolor="white", layout="constrained")
+    # Compact strip (~1200x360): the month chart is read at a glance, not studied.
+    fig = Figure(figsize=(12, 3.6), dpi=100, facecolor="white", layout="constrained")
     title = f"{month_name(lang, month)} {year}"
     if not any(
         v is not None for d in by_day.values() for v in (d.pv_kwh, d.home_kwh, d.grid_import_kwh)
@@ -331,16 +333,17 @@ def render_month_chart(
         ax.set_xlim(0.4, n + 0.6)
         ax.set_xticks(range(1, n + 1))
         ax.tick_params(axis="x", labelsize=FONT - 4)
-        ax.legend(
-            loc="lower left",
-            bbox_to_anchor=(0, 1.0),
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=4, integer=True))
+        ax.legend(  # top-right, on the title's line, to save height
+            loc="lower right",
+            bbox_to_anchor=(1.0, 1.0),
             ncol=3,
             frameon=False,
             fontsize=FONT - 1,
             columnspacing=1.5,
             handlelength=1.6,
         )
-        fig.suptitle(title, fontsize=FONT + 3, color=INK, x=0.02, ha="left")
+        ax.set_title(title, loc="left", fontsize=FONT + 3, color=INK, pad=10)
     buf = io.BytesIO()
     fig.savefig(buf, format="png")
     return buf.getvalue()
