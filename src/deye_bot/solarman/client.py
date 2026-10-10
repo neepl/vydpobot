@@ -158,6 +158,17 @@ def merge_snapshots(primary: Snapshot, fallback: Snapshot) -> Snapshot:
     return replace(primary, **merged, battery_state=battery_state(merged["battery_w"]))
 
 
+def with_estimated_battery(s: Snapshot) -> Snapshot:
+    """Fill a missing battery power from the energy balance: pv + grid - load.
+
+    Only when battery_w is absent and pv/load/grid are all known; a measured value always wins.
+    """
+    if s.battery_w is not None or s.pv_w is None or s.load_w is None or s.grid_w is None:
+        return s
+    est = s.pv_w + s.grid_w - s.load_w
+    return replace(s, battery_w=est, battery_state=battery_state(est), battery_estimated=True)
+
+
 # --------------------------------------------------------------------------- client
 
 
@@ -357,11 +368,11 @@ class SolarmanClient:
             await self.station_realtime_raw(station_id), self._tz, self._inv_batt, self._inv_grid
         )
         if not device_sn:
-            return station
+            return with_estimated_battery(station)
         device = snapshot_from_device(
             await self.device_current_raw(device_sn), self._tz, self._inv_batt, self._inv_grid
         )
-        return merge_snapshots(station, device)
+        return with_estimated_battery(merge_snapshots(station, device))
 
     async def get_history(
         self, station_id: int, start: datetime, end: datetime

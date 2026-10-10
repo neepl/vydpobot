@@ -176,6 +176,11 @@ warning), because device-level data is not available through the portal. `discov
 work with both backends. They must share the bot's database, so on the server run them with
 `docker compose exec vydpo-bot deye-bot …`, not with a different `DB_PATH`.
 
+The portal's station summary has no battery power field. Until a measured source is wired in, the
+bot estimates it from the energy balance (PV + grid − load) and marks it with "≈" everywhere it is
+shown. Expect the estimate to run typically 5–10% above the true value because of inverter losses.
+A measured value, when present, always wins.
+
 ### When the token stops working
 
 If the portal rejects the token, the bot stops calling the portal and sends **one** message to

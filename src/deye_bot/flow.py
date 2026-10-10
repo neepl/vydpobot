@@ -15,6 +15,8 @@ import matplotlib
 matplotlib.use("Agg")
 
 from matplotlib.axes import Axes  # noqa: E402
+from matplotlib.backend_bases import RendererBase  # noqa: E402
+from matplotlib.backends.backend_agg import FigureCanvasAgg  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 from matplotlib.patches import Circle, FancyBboxPatch, Polygon, Rectangle  # noqa: E402
 
@@ -31,6 +33,8 @@ HUB = (5.0, 4.0)
 HUB_HALF = 0.45
 ICON = 0.7  # icon box edge, data units (= px / 100)
 EDGE = 0.35  # margin from canvas edge to node content
+TEXT_GAP = 0.3  # min clearance between text and the vertical run
+MIN_FONT = 11.0
 ELBOW_DX = 1.2  # vertical run distance from the hub centre
 
 COLORS: dict[Node, str] = {"pv": C_PV, "grid": C_GRID, "battery": C_BAT, "home": C_LOAD}
@@ -226,6 +230,8 @@ def _node_texts(
     if node == "battery" and snap.soc is not None:
         label = f"{label} · {snap.soc:.0f}%"
     value = "—" if watts is None else fmt_power(lang, abs(watts))
+    if node == "battery" and snap.battery_estimated and watts is not None:
+        value = "≈" + value
     sub = ""
     if node == "grid" and watts is not None:
         key = "idle" if direction is None else "export" if watts < 0 else "import"
@@ -245,7 +251,13 @@ def _node_texts(
 
 
 def _draw_node(
-    ax: Axes, node: Node, snap: Snapshot, lang: Lang, watts: float | None, d: Direction | None
+    ax: Axes,
+    renderer: RendererBase,
+    node: Node,
+    snap: Snapshot,
+    lang: Lang,
+    watts: float | None,
+    d: Direction | None,
 ) -> None:
     left, top = CORNERS[node]
     color = COLORS[node]
@@ -264,10 +276,20 @@ def _draw_node(
     else:
         _icon_home(ax, cx, cy, color)
 
+    xv = HUB[0] + (-ELBOW_DX if left else ELBOW_DX)  # the node's vertical run
+    room = (xv - TEXT_GAP - tx) if left else (tx - (xv + TEXT_GAP))
+
     def text(y: float, s: str, size: float, color: str, weight: str = "normal") -> None:
-        ax.text(
+        t_ = ax.text(
             tx, y, s, ha=ha, va="center", fontsize=size, color=color, fontweight=weight, zorder=6
         )
+        # step the font down until the text clears the vertical run
+        while t_.get_fontsize() > MIN_FONT:
+            bb = t_.get_window_extent(renderer)
+            (x0, _), (x1, _) = ax.transData.inverted().transform(bb.get_points())
+            if x1 - x0 <= room:
+                break
+            t_.set_fontsize(t_.get_fontsize() - 0.5)
 
     if top:
         text(7.62, label, 12, INK_MUTED)
@@ -306,6 +328,7 @@ def build_flow_figure(
     peak = max((abs(v) for v in watts.values() if v is not None), default=0.0)
 
     fig = Figure(figsize=(5, 4), dpi=200, facecolor="white")
+    renderer = FigureCanvasAgg(fig).get_renderer()
     ax = fig.add_axes((0, 0, 1, 1))
     ax.set_xlim(0, W)
     ax.set_ylim(0, H)
@@ -313,7 +336,7 @@ def build_flow_figure(
     for node, w in watts.items():
         d = flow_direction(node, w)
         _draw_connection(ax, node, w, peak, d)
-        _draw_node(ax, node, snapshot, lang, w, d)
+        _draw_node(ax, renderer, node, snapshot, lang, w, d)
     _draw_hub(ax)
     text, stale = _footer(snapshot, lang, tz, now, stale_after_min)
     ax.text(

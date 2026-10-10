@@ -33,6 +33,7 @@ from deye_bot.solarman.client import (
     SolarmanError,
     _num,
     snapshot_from_station,
+    with_estimated_battery,
 )
 from deye_bot.storage import (
     KEY_PORTAL_ACCESS,
@@ -411,7 +412,9 @@ class PortalClient:
             self._warned_sn = True
             log.warning("SOLARMAN_DEVICE_SN is ignored by the portal backend")
         raw = alias_station(await self._station(station_id))
-        return snapshot_from_station(raw, self._tz, self._inv_batt, self._inv_grid)
+        return with_estimated_battery(
+            snapshot_from_station(raw, self._tz, self._inv_batt, self._inv_grid)
+        )
 
     async def get_history(
         self, station_id: int, start: datetime, end: datetime

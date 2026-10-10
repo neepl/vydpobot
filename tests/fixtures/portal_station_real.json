@@ -1,0 +1,16 @@
+{
+  "id": 61234567,
+  "name": "Plant",
+  "lastUpdateTime": 1791617780.0,
+  "generationPower": 8895.0,
+  "usePower": 2733.0,
+  "buyPower": 15750.0,
+  "gridPower": null,
+  "batterySoc": 70.33,
+  "networkStatus": "NORMAL",
+  "installedCapacity": 16.1,
+  "generationValue": 12.5,
+  "useValue": 23.5,
+  "buyValue": 33.1,
+  "gridValue": 0.0
+}

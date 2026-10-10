@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -186,11 +187,10 @@ async def _allow(update, bot_data, *, admin: bool = False) -> bool:
     return True
 
 
-def test_worst_case_text_clears_lines() -> None:
+def _assert_text_clear(s: Snapshot, lang: Lang) -> None:
     from deye_bot.flow import build_flow_figure
 
-    worst = snap(100, 23456, 1500, -12345, -12345)
-    fig, ax = build_flow_figure(worst, lang="uk", tz=TZ, now=NOW)
+    fig, ax = build_flow_figure(s, lang=lang, tz=TZ, now=NOW)
     renderer = FigureCanvasAgg(fig).get_renderer()
     inv = ax.transData.inverted()
     segs = [
@@ -205,3 +205,18 @@ def test_worst_case_text_clears_lines() -> None:
             lo_x, hi_x = min(xa, xb) - 0.1, max(xa, xb) + 0.1
             lo_y, hi_y = min(ya, yb) - 0.1, max(ya, yb) + 0.1
             assert not (x0 < hi_x and x1 > lo_x and y0 < hi_y and y1 > lo_y), text.get_text()
+
+
+@pytest.mark.parametrize("lang", ["en", "uk"])
+@pytest.mark.parametrize(
+    "s",
+    [
+        snap(100, 23456, 1500, -12345, -12345),
+        replace(snap(100, 188880, 188880, 188880, -188880), battery_estimated=True),
+        replace(snap(100, 188880, 188880, -188880, 188880), battery_estimated=True),
+        replace(snap(70, 8895, 2733, 15750, 21912), battery_estimated=True),
+    ],
+    ids=["worst", "huge_discharge", "huge_charge", "real_estimated"],
+)
+def test_text_clears_lines(s: Snapshot, lang: Lang) -> None:
+    _assert_text_clear(s, lang)

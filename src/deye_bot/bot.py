@@ -96,10 +96,11 @@ def _status_lines(snapshot: Snapshot, lang: Lang, threshold: float | None) -> li
         return na if w is None else fmt_power(lang, w)
 
     s = snapshot
+    approx = "≈" if s.battery_estimated else ""
     if s.battery_state == BatteryState.CHARGING:
-        state = t(lang, "status.state.charging", power=power(abs(s.battery_w or 0)))
+        state = t(lang, "status.state.charging", power=approx + power(abs(s.battery_w or 0)))
     elif s.battery_state == BatteryState.DISCHARGING:
-        state = t(lang, "status.state.discharging", power=power(abs(s.battery_w or 0)))
+        state = t(lang, "status.state.discharging", power=approx + power(abs(s.battery_w or 0)))
     elif s.battery_state == BatteryState.IDLE:
         state = t(lang, "status.state.idle")
     else:
@@ -180,8 +181,9 @@ def format_live_summary(
     """Short first line of the live caption (shown in Telegram's pinned bar)."""
     s = snapshot
     soc = DASH if s.soc is None else f"{s.soc:.0f}%"
+    approx = "≈" if s.battery_estimated and s.battery_w is not None else ""
     parts = [
-        f"🔋 {soc} {_kw(lang, s.battery_w, signed='battery')}",
+        f"🔋 {soc} {approx}{_kw(lang, s.battery_w, signed='battery')}",
         f"☀️ {_kw(lang, s.pv_w)}",
         f"🏠 {_kw(lang, s.load_w)}",
         f"🔌 {_kw(lang, s.grid_w, signed='grid')} {t(lang, 'unit.kw')}",
