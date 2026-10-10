@@ -296,7 +296,42 @@ Stop: `docker compose down`. Logs are rotated (3 x 10 MB).
 | `/threshold <5..100>` | admins | Set threshold (persisted; resets the alert cycle) |
 | `/lang` | allowed chats | Show current language |
 | `/lang <en\|uk>` | admins | Switch language (persisted) |
+| `/live` | admins | Start or refresh the pinned live-status message |
+| `/live off` | admins | Remove the live-status message |
 | `/token <value>` | admins, private chat | Portal backend only, hidden: supply a new refresh token |
 
 Access: read-only commands work in `ALERT_CHAT_ID`, `ALLOWED_CHAT_IDS`, and in private chats
 with admins. Others get a "not allowed" reply in private chats and are ignored in groups.
+
+## Live status (pinned message)
+
+A single message in the group that always shows the current status: the power-flow picture plus
+a caption. The bot edits it on every poll, so it never needs a new `/status`.
+
+- `/live` (admin): creates the message, pins it silently and starts updating it. Running it again
+  just refreshes the existing message. The `/live` command itself is deleted to keep the chat clean.
+- `/live off` (admin): unpins and deletes the message and stops updating it.
+- Works in the alert group and in other allowed chats; each chat has its own live message.
+
+**Permission.** To pin, the bot needs one right in the group: Edit -> Administrators -> Add
+Admin -> @vydpo_bot, and enable ONLY "Pin Messages". Without it the bot still keeps the message
+updated, just not pinned (it tells you so).
+
+**Notifications.** Edits are silent. Alerts stay separate notifying messages.
+
+**No extra API calls.** The picture is refreshed from the data already fetched by the regular
+poll (or the last stored sample if a poll fails, so the "updated ... ago" text and the stale
+warning keep aging). `/lang` and `/threshold` changes show up immediately.
+
+The first caption line is what Telegram shows in the pinned bar:
+`🔋 47% +3.2 · ☀️ 5.1 · 🏠 2.0 · 🔌 0.1 kW · 10:35`
+
+| Part | Meaning |
+| --- | --- |
+| `🔋 47% +3.2` | Battery charge, and battery power in kW: `+` charging, `−` discharging, `0.0` idle |
+| `☀️ 5.1` | Solar generation, kW |
+| `🏠 2.0` | Home consumption, kW |
+| `🔌 0.1` | Grid, kW: no sign = buying (import), `−` = selling (export) |
+| `10:35` | Time of the reading (`dd.mm HH:MM` if not from today); `⚠️` in front means stale data |
+
+`—` stands for a missing value.

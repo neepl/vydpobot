@@ -11,6 +11,8 @@ _HELP_EN = (
     "/graph [hours] - chart for the last 1-48 hours (default 24)\n"
     "/threshold [value] - show or set the battery alert level, %\n"
     "/lang [en|uk] - show or set the interface language\n"
+    "/live - pin a live status message that updates on every poll (admin)\n"
+    "/live off - stop and remove the live message (admin)\n"
     "/help - this message"
 )
 _HELP_UK = (
@@ -19,6 +21,9 @@ _HELP_UK = (
     "/graph [години] - графік за останні 1-48 годин (типово 24)\n"
     "/threshold [значення] - показати або змінити поріг сповіщення про заряд, %\n"
     "/lang [en|uk] - показати або змінити мову інтерфейсу\n"
+    "/live - закріпити повідомлення зі станом, що оновлюється під час кожного опитування "
+    "(адмін)\n"
+    "/live off - зупинити й видалити живе повідомлення (адмін)\n"
     "/help - ця довідка"
 )
 
@@ -102,6 +107,15 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         ),
         "token.usage": "Usage: /token <refresh_token>",
         "token.not_portal": "This command only works with SOLARMAN_BACKEND=portal.",
+        "live.started": "Live status is on: the message is updated on every poll.",
+        "live.stopped": "Live status is off.",
+        "live.not_active": "Live status is not active in this chat. Start it with /live.",
+        "live.no_pin_rights": (
+            "Live status is on, but I could not pin the message. To pin it, make the bot a group "
+            'administrator with only the "Pin messages" right. Until then the message '
+            "is updated without being pinned."
+        ),
+        "live.updated": "Updated {datetime} ({ago})",
         "unit.w": "W",
         "unit.kw": "kW",
         "time.ago.min": "{n} minutes ago",
@@ -193,6 +207,17 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         ),
         "token.usage": "Використання: /token <токен>",
         "token.not_portal": "Ця команда працює лише з SOLARMAN_BACKEND=portal.",
+        "live.started": (
+            "Живий стан увімкнено: повідомлення оновлюється під час кожного опитування."
+        ),
+        "live.stopped": "Живий стан вимкнено.",
+        "live.not_active": "У цьому чаті живий стан не активний. Увімкніть його командою /live.",
+        "live.no_pin_rights": (
+            "Живий стан увімкнено, але я не зміг закріпити повідомлення. Щоб його закріпити, "
+            "зробіть бота адміністратором групи лише з правом «Закріплювати повідомлення». "
+            "Доти повідомлення оновлюватиметься без закріплення."
+        ),
+        "live.updated": "Оновлено {datetime} ({ago})",
         "unit.w": "Вт",
         "unit.kw": "кВт",
         "time.ago.min": "{n} хвилин тому",

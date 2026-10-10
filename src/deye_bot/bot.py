@@ -9,8 +9,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from telegram import BotCommand, Update
+from telegram import BotCommand, InputMediaPhoto, Update
 from telegram.constants import ChatAction, ChatType, ParseMode
+from telegram.error import BadRequest, Forbidden
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from deye_bot.alerts import (
@@ -29,6 +30,7 @@ from deye_bot.source import DataSource, make_source
 from deye_bot.storage import (
     KEY_ALERT_STATE,
     KEY_LANGUAGE,
+    KEY_LIVE_MESSAGES,
     KEY_PORTAL_AUTH_NOTIFIED,
     KEY_THRESHOLD,
     Storage,
@@ -51,7 +53,7 @@ STATE_EMOJI = {
     BatteryState.UNKNOWN: "❔",
 }
 
-COMMANDS = ("start", "help", "status", "graph", "threshold", "lang")
+COMMANDS = ("start", "help", "status", "graph", "threshold", "lang", "live")
 
 
 # --------------------------------------------------------------------------- pure helpers
@@ -86,15 +88,8 @@ def _local(ts: datetime, tz: ZoneInfo, now: datetime) -> str:
     return local.strftime(fmt)
 
 
-def format_status(
-    snapshot: Snapshot,
-    lang: Lang,
-    tz: ZoneInfo,
-    now: datetime,
-    threshold: float | None = None,
-    stale_after_min: int = 30,
-) -> str:
-    """Build the HTML /status message from a snapshot."""
+def _status_lines(snapshot: Snapshot, lang: Lang, threshold: float | None) -> list[str]:
+    """Title through SOC bar of the status message (shared by /status and the live caption)."""
     na = t(lang, "status.na")
 
     def power(w: float | None) -> str:
@@ -122,8 +117,7 @@ def format_status(
     low = threshold is not None and s.soc is not None and s.soc <= threshold
     bat_txt = na if s.soc is None else t(lang, "status.battery", soc=_num(s.soc))
     bat = f"{'🪫' if low else '🔋'} {bat_txt}"
-    age = max(0.0, (now - s.ts).total_seconds())
-    lines = [
+    return [
         f"<b>{html.escape(t(lang, 'status.title'))}</b>",
         "",
         f"{STATE_EMOJI[s.battery_state]} {html.escape(state)}",
@@ -132,11 +126,88 @@ def format_status(
         f"🔌 {html.escape(grid)}",
         html.escape(bat),
         f"<code>{soc_bar(s.soc)}</code>",
+    ]
+
+
+def _is_stale(age: float, stale_after_min: int) -> bool:
+    return bool(stale_after_min) and age > stale_after_min * 60
+
+
+def _stale_line(lang: Lang, age: float) -> str:
+    return f"⚠️ {html.escape(t(lang, 'status.stale_warning', ago=fmt_ago(lang, age)))}"
+
+
+def format_status(
+    snapshot: Snapshot,
+    lang: Lang,
+    tz: ZoneInfo,
+    now: datetime,
+    threshold: float | None = None,
+    stale_after_min: int = 30,
+) -> str:
+    """Build the HTML /status message from a snapshot."""
+    s = snapshot
+    age = max(0.0, (now - s.ts).total_seconds())
+    lines = _status_lines(s, lang, threshold)
+    lines += [
         "",
         html.escape(t(lang, "status.updated", time=_local(s.ts, tz, now), ago=fmt_ago(lang, age))),
     ]
-    if stale_after_min and age > stale_after_min * 60:
-        lines.append(f"⚠️ {html.escape(t(lang, 'status.stale_warning', ago=fmt_ago(lang, age)))}")
+    if _is_stale(age, stale_after_min):
+        lines.append(_stale_line(lang, age))
+    return "\n".join(lines)
+
+
+MINUS = "\u2212"
+DASH = "—"
+
+
+def _kw(lang: Lang, w: float | None, *, signed: str = "none") -> str:
+    """One-decimal kW. signed: 'none' (absolute), 'battery' (+/-), 'grid' (- when exporting)."""
+    if w is None:
+        return DASH
+    text = fmt_num(lang, abs(w) / 1000, 1)
+    if abs(w) < GRID_IDLE_W or signed == "none":
+        return fmt_num(lang, 0.0, 1) if abs(w) < GRID_IDLE_W else text
+    if signed == "battery":
+        return ("+" if w > 0 else MINUS) + text
+    return (MINUS if w < 0 else "") + text
+
+
+def format_live_summary(
+    snapshot: Snapshot, lang: Lang, tz: ZoneInfo, now: datetime, stale: bool = False
+) -> str:
+    """Short first line of the live caption (shown in Telegram's pinned bar)."""
+    s = snapshot
+    soc = DASH if s.soc is None else f"{s.soc:.0f}%"
+    parts = [
+        f"🔋 {soc} {_kw(lang, s.battery_w, signed='battery')}",
+        f"☀️ {_kw(lang, s.pv_w)}",
+        f"🏠 {_kw(lang, s.load_w)}",
+        f"🔌 {_kw(lang, s.grid_w, signed='grid')} {t(lang, 'unit.kw')}",
+        _local(s.ts, tz, now),
+    ]
+    return ("⚠️ " if stale else "") + " · ".join(parts)
+
+
+def format_live_caption(
+    snapshot: Snapshot,
+    lang: Lang,
+    tz: ZoneInfo,
+    now: datetime,
+    threshold: float | None = None,
+    stale_after_min: int = 30,
+) -> str:
+    """HTML caption of the pinned live-status photo: summary, details, update time."""
+    s = snapshot
+    age = max(0.0, (now - s.ts).total_seconds())
+    stale = _is_stale(age, stale_after_min)
+    when = s.ts.astimezone(tz).strftime("%d.%m.%Y %H:%M")
+    lines = [format_live_summary(s, lang, tz, now, stale), ""]
+    lines += _status_lines(s, lang, threshold)
+    lines += ["", html.escape(t(lang, "live.updated", datetime=when, ago=fmt_ago(lang, age)))]
+    if stale:
+        lines.append(_stale_line(lang, age))
     return "\n".join(lines)
 
 
@@ -210,6 +281,7 @@ class PollResult:
 
     alerts: list[str] = field(default_factory=list)  # -> alert chat
     admin_notices: list[str] = field(default_factory=list)  # -> admins' private chats
+    snapshot: Snapshot | None = None  # fetched this cycle (None on failure)
 
 
 def _auth_notice(bot_data: dict[str, Any]) -> list[str]:
@@ -253,6 +325,7 @@ async def poll_once(bot_data: dict[str, Any], now: datetime) -> PollResult:
         result.alerts = [format_event(AlertEvent("stale", stale_seconds=ago), lang)]
         return result
 
+    result.snapshot = snap
     bot_data["fail_count"] = 0
     if storage.get_json(KEY_PORTAL_AUTH_NOTIFIED):
         storage.set_json(KEY_PORTAL_AUTH_NOTIFIED, False)
@@ -276,6 +349,100 @@ async def poll_once(bot_data: dict[str, Any], now: datetime) -> PollResult:
         return result
     result.alerts = [format_event(e, lang, snap) for e in events]
     return result
+
+
+# --------------------------------------------------------------------------- live status
+
+
+def _live_map(storage: Storage) -> dict[str, int]:
+    return dict(storage.get_json(KEY_LIVE_MESSAGES) or {})
+
+
+async def _pin(bot: Any, chat_id: int, message_id: int) -> bool:
+    """Pin silently; False if the bot lacks the right."""
+    try:
+        await bot.pin_chat_message(chat_id, message_id, disable_notification=True)
+    except (BadRequest, Forbidden) as e:
+        log.info("Cannot pin live message in chat %s: %s", chat_id, e)
+        return False
+    return True
+
+
+async def _send_live(bot: Any, chat_id: int, png: bytes, caption: str) -> tuple[int, bool]:
+    """Send the live photo and pin it. Returns (message_id, pinned)."""
+    msg = await bot.send_photo(chat_id, png, caption=caption, parse_mode=ParseMode.HTML)
+    return msg.message_id, await _pin(bot, chat_id, msg.message_id)
+
+
+def _gone(e: BadRequest) -> bool:
+    text = str(e).lower()
+    return any(m in text for m in ("not found", "message_id_invalid", "can't be edited"))
+
+
+async def refresh_live(
+    bot: Any, bd: dict[str, Any], snap: Snapshot | None, only_chat: int | None = None
+) -> None:
+    """Edit the live message(s) with `snap`. Never raises; never calls the data source."""
+    try:
+        storage: Storage = bd["storage"]
+        live = _live_map(storage)
+        if only_chat is not None:
+            live = {k: v for k, v in live.items() if k == str(only_chat)}
+        if not live:
+            return
+        snap = snap or storage.latest_sample()
+        if snap is None:
+            return
+        settings: Settings = bd["settings"]
+        lang, now = get_lang(bd), datetime.now(UTC)
+        caption = format_live_caption(
+            snap, lang, settings.tz, now, get_threshold(bd), settings.stale_after_min
+        )
+        png = await asyncio.to_thread(
+            render_flow,
+            snap,
+            lang=lang,
+            tz=settings.tz,
+            now=now,
+            stale_after_min=settings.stale_after_min,
+        )
+    except Exception:
+        log.exception("Live refresh preparation failed")
+        return
+    updates: dict[str, int] = {}
+    dropped: set[str] = set()
+    for key, message_id in live.items():
+        chat_id = int(key)
+        try:
+            media = InputMediaPhoto(png, caption=caption, parse_mode=ParseMode.HTML)
+            await bot.edit_message_media(chat_id, message_id, media=media)
+        except BadRequest as e:
+            if "message is not modified" in str(e).lower():
+                continue
+            if not _gone(e):
+                log.warning("Live refresh failed in chat %s: %s", chat_id, e)
+                continue
+            try:
+                updates[key], _ = await _send_live(bot, chat_id, png, caption)
+            except Exception:
+                log.exception("Live re-send failed in chat %s", chat_id)
+        except Forbidden as e:
+            log.warning("Live message dropped, bot lost access to chat %s: %s", chat_id, e)
+            dropped.add(key)
+        except Exception:
+            log.exception("Live refresh failed in chat %s", chat_id)
+    if updates or dropped:
+        fresh = _live_map(storage)
+        for key in dropped:
+            fresh.pop(key, None)
+        fresh.update({k: v for k, v in updates.items() if k in fresh})
+        storage.set_json(KEY_LIVE_MESSAGES, fresh)
+
+
+async def _refresh_live_now(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Immediate refresh from the latest stored sample (after /lang, /threshold)."""
+    bd = context.application.bot_data
+    await refresh_live(context.bot, bd, bd["storage"].latest_sample())
 
 
 # --------------------------------------------------------------------------- handlers
@@ -434,6 +601,7 @@ async def cmd_threshold(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     storage.set_json(KEY_THRESHOLD, value)
     _save_state(storage, AlertState(stale_notified=_load_state(storage).stale_notified))
     await _reply(update, html.escape(t(lang, "bot.threshold.set", threshold=_num(value))))
+    await _refresh_live_now(context)
 
 
 async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -452,6 +620,73 @@ async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     bd["storage"].set_json(KEY_LANGUAGE, new)
     await _reply(update, html.escape(t(new, "bot.lang.set")))
+    await _refresh_live_now(context)
+
+
+async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: `/live` starts/refreshes the pinned live-status message, `/live off` removes it."""
+    bd = context.application.bot_data
+    if not await _guard(update, bd, admin=True):
+        return
+    chat, message = update.effective_chat, update.effective_message
+    assert chat is not None
+    settings: Settings = bd["settings"]
+    storage: Storage = bd["storage"]
+    bot, lang, key = context.bot, get_lang(bd), str(chat.id)
+    live = _live_map(storage)
+
+    async def say(msg_key: str) -> None:
+        await bot.send_message(chat.id, html.escape(t(lang, msg_key)), parse_mode=ParseMode.HTML)
+
+    if context.args and context.args[0].lower() == "off":
+        if key not in live:
+            await say("live.not_active")
+        else:
+            message_id = live.pop(key)
+            with suppress(Exception):
+                await bot.unpin_chat_message(chat.id, message_id)
+            with suppress(Exception):
+                await bot.delete_message(chat.id, message_id)
+            storage.set_json(KEY_LIVE_MESSAGES, live)
+            await say("live.stopped")
+    else:
+        snap = None
+        try:
+            station_id = await get_station_id(bd)
+            snap = await bd["source"].get_snapshot(station_id, settings.solarman_device_sn)
+        except Exception:
+            log.exception("Live status fetch failed")
+            snap = storage.latest_sample()
+        if snap is None:
+            await say("bot.error")
+        elif key in live:
+            await refresh_live(bot, bd, snap, only_chat=chat.id)
+            await say("live.started")
+        else:
+            now = datetime.now(UTC)
+            try:
+                caption = format_live_caption(
+                    snap, lang, settings.tz, now, get_threshold(bd), settings.stale_after_min
+                )
+                png = await asyncio.to_thread(
+                    render_flow,
+                    snap,
+                    lang=lang,
+                    tz=settings.tz,
+                    now=now,
+                    stale_after_min=settings.stale_after_min,
+                )
+                message_id, pinned = await _send_live(bot, chat.id, png, caption)
+            except Exception:
+                log.exception("Live message creation failed")
+                await say("bot.error")
+            else:
+                live[key] = message_id
+                storage.set_json(KEY_LIVE_MESSAGES, live)
+                await say("live.started" if pinned else "live.no_pin_rights")
+    if message is not None:
+        with suppress(Exception):  # best effort; may lack delete rights
+            await message.delete()
 
 
 async def cmd_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -502,6 +737,7 @@ def admin_targets(settings: Settings) -> list[int]:
 
 async def poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     bd = context.application.bot_data
+    result = PollResult()
     try:
         result = await poll_once(bd, datetime.now(UTC))
         settings: Settings = bd["settings"]
@@ -512,6 +748,11 @@ async def poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 await context.bot.send_message(chat_id, msg, parse_mode=ParseMode.HTML)
     except Exception:
         log.exception("Poll job failed")
+    try:
+        snap = result.snapshot or bd["storage"].latest_sample()
+        await refresh_live(context.bot, bd, snap)
+    except Exception:
+        log.exception("Live refresh failed")
 
 
 async def prune_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -539,6 +780,7 @@ def _commands(lang: Lang) -> list[BotCommand]:
             "graph": "Power and SOC chart [hours]",
             "threshold": "View or set the SOC alert threshold",
             "lang": "View or set the language",
+            "live": "Pinned live status (admin): /live, /live off",
         },
         "uk": {
             "start": "Показати довідку",
@@ -547,6 +789,7 @@ def _commands(lang: Lang) -> list[BotCommand]:
             "graph": "Графік потужності та заряду [годин]",
             "threshold": "Переглянути або змінити поріг сповіщень",
             "lang": "Переглянути або змінити мову",
+            "live": "Закріплений живий стан (адмін): /live, /live off",
         },
     }[lang]
     return [BotCommand(c, desc[c]) for c in COMMANDS]
@@ -588,6 +831,7 @@ def run(settings: Settings) -> None:
         ("graph", cmd_graph),
         ("threshold", cmd_threshold),
         ("lang", cmd_lang),
+        ("live", cmd_live),
         ("token", cmd_token),  # hidden: not in COMMANDS / set_my_commands
     ):
         app.add_handler(CommandHandler(name, fn))

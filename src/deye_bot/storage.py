@@ -12,6 +12,7 @@ from deye_bot.models import BatteryState, HistoryPoint, Snapshot
 KEY_ALERT_STATE = "alert_state"
 KEY_THRESHOLD = "threshold_override"
 KEY_LANGUAGE = "language_override"
+KEY_LIVE_MESSAGES = "live_messages"  # {str(chat_id): message_id} of pinned live-status messages
 KEY_PORTAL_REFRESH_TOKEN = "portal_refresh_token"  # rotated refresh token (secret)
 KEY_PORTAL_ACCESS = "portal_access"  # {"access", "expires_at"} shared between processes (secret)
 KEY_PORTAL_BOOTSTRAP_SHA = "portal_bootstrap_sha"  # sha256 of the last-seen env bootstrap token
