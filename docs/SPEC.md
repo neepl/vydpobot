@@ -278,8 +278,9 @@ Reference implementation studied: github.com/Aksolotl123/ha-solarman-cloud (2026
 ### Auth facts
 - Password login (`grant_type=mdc_password`) is protected by a slider CAPTCHA → scripted login gets
   HTTP 412 `AUTH_SLIDE_ERROR`. **Never attempt password login.**
-- User logs in once in a browser (private window, **test account**), copies the refresh token from
-  cookie `442287045fabeaa868450dec4baee7f4` on home.solarmanpv.com (value may be URL-encoded →
+- User logs in once in a browser (private window, **test account**), copies `refresh_token` from the JSON
+  response of the `oauth2-s/oauth/token` login request (DevTools → Network; some regions also have
+  an HttpOnly cookie `442287045fabeaa868450dec4baee7f4`, value may be URL-encoded →
   `urllib.parse.unquote`), then closes the window **without logging out**.
 - Renewal: `POST {base}/oauth2-s/oauth/token`, form-urlencoded
   `grant_type=refresh_token, refresh_token=<rt>, client_id=test, system=SOLARMAN[, area=<code>]`,

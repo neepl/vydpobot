@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     # --- Solarman web portal (required when backend == portal) ---
     solarman_portal_base_url: str = "https://home.solarmanpv.com"
     solarman_portal_area: str | None = None  # omitted from the token request when unset
-    # Bootstrap refresh token copied from the browser cookie; rotated values live in the DB.
+    # Bootstrap refresh token copied from the browser login response; rotated values live in the DB.
     solarman_portal_refresh_token: SecretStr | None = None
 
     # --- Monitoring ---

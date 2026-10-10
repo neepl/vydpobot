@@ -131,34 +131,40 @@ Select it with `SOLARMAN_BACKEND=portal`; the default stays `openapi`.
 ### How it authenticates
 
 Password login on the portal is protected by a slider CAPTCHA, so a script cannot log in. Instead
-you log in once in a browser and give the bot the **refresh token** stored in a cookie. The bot
+you log in once in a browser and give the bot the **refresh token** from the login response. The bot
 exchanges it for short-lived access tokens. Each exchange **rotates** the refresh token; the bot
 saves the new one in its SQLite database right away. The token you put in `.env` is only the
 starting value: the rotated one in the database wins, until you put a *different* token in `.env`.
 
 ### Capturing the token
 
-1. Open a **private/incognito browser window**.
-2. Go to [home.solarmanpv.com](https://home.solarmanpv.com) and log in with the **test account**
-   (solve the slider).
-3. Press **F12**, open the **Application** tab (Chrome/Edge) or **Storage** (Firefox), then
-   **Cookies** -> `https://home.solarmanpv.com`.
-4. Find the cookie named `442287045fabeaa868450dec4baee7f4` and copy its **Value**. Or paste this
-   one-liner into the **Console** tab, which copies the decoded value to the clipboard:
+The refresh token is visible in the JSON response of the login request (on at least the
+`FOREIGN_1` region there is no refresh-token cookie).
 
-   ```js
-   copy(decodeURIComponent(document.cookie.split('; ').find(c=>c.startsWith('442287045fabeaa868450dec4baee7f4=')).split('=').slice(1).join('=')))
-   ```
-5. **Close the window without logging out.** Do not click "Log out": the refresh token is
+1. Open a **private/incognito window** at [home.solarmanpv.com](https://home.solarmanpv.com).
+   Open DevTools (**F12**) **before** logging in: **Network** tab, tick **Preserve log**, and
+   type `token` in the filter.
+2. Log in with the **test account** (solve the slider).
+3. Click the `oauth2-s/oauth/token` request, then **Response**. The JSON contains
+   `access_token`, `refresh_token`, `expires_in` (86399), `mdc` and more. Copy the value of
+   **`refresh_token`** (the long `eyJ...` string; its payload has an `ati` claim and it is valid
+   for about 6 months). Do **not** take `access_token`: it expires in 24 hours.
+4. **Close the window without logging out.** Do not click "Log out": the refresh token is
    rotated by the bot from now on, and logging out may revoke the token on the server. Also do not
    keep using that browser session, because a second client renewing the same token would
    invalidate the bot's.
+5. **Never paste the token into chats.** Put it into `.env` on the server, or send it with
+   `/token <value>` in a private chat with the bot (the bot deletes the message).
+
+Alternative: on some regions a refresh-token cookie
+`442287045fabeaa868450dec4baee7f4` exists (DevTools -> Application -> Cookies). It is HttpOnly,
+so `document.cookie` cannot see it; copy its value by hand (it may be URL-encoded).
 
 ### Configuration
 
 ```env
 SOLARMAN_BACKEND=portal
-SOLARMAN_PORTAL_REFRESH_TOKEN=<the cookie value>
+SOLARMAN_PORTAL_REFRESH_TOKEN=<the refresh_token value>
 # Optional, only if your region needs it (sent as `area` when renewing the token):
 # SOLARMAN_PORTAL_AREA=PL
 # Optional, default https://home.solarmanpv.com (some regions: https://globalhome.solarmanpv.com):

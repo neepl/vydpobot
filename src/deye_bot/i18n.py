@@ -85,14 +85,16 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "bot.graph.invalid": "Enter a whole number of hours from 1 to 48, e.g. /graph 12",
         "portal.auth_failed": (
             "The Solarman portal rejected the saved token, so the bot cannot read inverter "
-            "data. To get a new one: open a private browser window, log in with the test "
-            "account at home.solarmanpv.com, press F12, go to Application, Cookies, and copy "
-            "the value of the cookie 442287045fabeaa868450dec4baee7f4. Close the window "
-            "without logging out. Then send /token <value> to this bot in a private chat."
+            "data. To get a new one: open a private browser window at home.solarmanpv.com, "
+            'press F12, go to Network, tick Preserve log and filter by "token". Log in with '
+            "the test account, open the oauth2-s/oauth/token request, and on the Response tab "
+            "copy the value of refresh_token (not access_token). Close the window without "
+            "logging out. Then send /token <value> to this bot in a private chat."
         ),
         "token.ok": "Token accepted and saved.",
         "token.failed": (
-            "The token was not accepted. Make sure you copied the whole cookie value and try again."
+            "The token was not accepted. Make sure you copied the whole refresh_token value and "
+            "try again."
         ),
         "token.private_only": (
             "Send /token only in a private chat with the bot. Your message was deleted; if it "
@@ -173,15 +175,16 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "bot.graph.invalid": "Введіть ціле число годин від 1 до 48, наприклад /graph 12",
         "portal.auth_failed": (
             "Портал Solarman відхилив збережений токен, тому бот не може читати дані інвертора. "
-            "Щоб отримати новий: відкрийте приватне вікно браузера, увійдіть тестовим обліковим "
-            "записом на home.solarmanpv.com, натисніть F12, перейдіть до Application, Cookies і "
-            "скопіюйте значення cookie 442287045fabeaa868450dec4baee7f4. Закрийте вікно, не "
-            "виходячи з облікового запису. Потім надішліть боту в приватному чаті: "
-            "/token <значення>."
+            "Щоб отримати новий: відкрийте приватне вікно браузера на home.solarmanpv.com, "
+            "натисніть F12, перейдіть на вкладку Network, увімкніть Preserve log і відфільтруйте "
+            'за словом "token". Увійдіть тестовим обліковим записом, відкрийте запит '
+            "oauth2-s/oauth/token і на вкладці Response скопіюйте значення refresh_token "
+            "(не access_token). Закрийте вікно, не виходячи з облікового запису. Потім "
+            "надішліть боту в приватному чаті: /token <значення>."
         ),
         "token.ok": "Токен прийнято й збережено.",
         "token.failed": (
-            "Токен не прийнято. Переконайтеся, що скопіювали все значення cookie, "
+            "Токен не прийнято. Переконайтеся, що скопіювали усе значення refresh_token, "
             "і спробуйте ще раз."
         ),
         "token.private_only": (

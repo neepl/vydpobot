@@ -1,9 +1,9 @@
 """Async client for the unofficial SolarmanPV web-portal API (temporary backend).
 
 Password login is protected by a slider CAPTCHA, so this client never logs in: the user copies
-a refresh token from the browser cookie. Every renewal rotates that token; the rotated value is
-persisted in Storage before anything else happens, and the stored value is always the one used
-for the next renewal. Tokens are scrubbed from every logged or raised text.
+a refresh token from the browser login response. Every renewal rotates that token; the rotated
+value is persisted in Storage before anything else happens, and the stored value is always the
+one used for the next renewal. Tokens are scrubbed from every logged or raised text.
 """
 
 import asyncio
