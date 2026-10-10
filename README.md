@@ -4,10 +4,15 @@
 monitors a Deye hybrid inverter (tested design target: three-phase LV
 SUN-xK-SG04LP3) through the Solarman Cloud OpenAPI. It runs in Docker on a small VPS.
 
+<p>
+  <img src="docs/img/status_flow.png" width="48%" alt="/status power flow">
+  <img src="docs/img/graph_uk.png" width="48%" alt="/graph 24h chart (Ukrainian)">
+</p>
+
 ## Features
 
-- `/status`: live power flow (PV, load, grid import/export, battery charge/discharge) and a
-  10-cell battery SOC bar.
+- `/status`: a power-flow diagram (solar, grid, battery, home, with flow direction and power)
+  and a text summary caption with a 10-cell battery SOC bar.
 - Battery alerts: a message when SOC falls to a threshold (default 50 %) and at every further
   step (45 %, 40 %, ...), a "recovered" message once SOC climbs back above the threshold plus a
   hysteresis. Oscillation around a level does not spam.

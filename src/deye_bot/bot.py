@@ -19,6 +19,7 @@ from deye_bot.alerts import (
 )
 from deye_bot.charts import render_chart, summarize
 from deye_bot.config import Settings
+from deye_bot.flow import render_flow
 from deye_bot.i18n import SUPPORTED, Lang, fmt_ago, fmt_num, fmt_power, t
 from deye_bot.models import BatteryState, HistoryPoint, Snapshot
 from deye_bot.solarman.client import SolarmanClient
@@ -271,10 +272,27 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if snap is None:
             await _reply(update, html.escape(t(lang, "bot.error")))
             return
-    await _reply(
-        update,
-        format_status(snap, lang, settings.tz, now, get_threshold(bd), settings.stale_after_min),
+    caption = format_status(
+        snap, lang, settings.tz, now, get_threshold(bd), settings.stale_after_min
     )
+    message = update.effective_message
+    if message is not None:
+        try:
+            if update.effective_chat:
+                await update.effective_chat.send_action(ChatAction.UPLOAD_PHOTO)
+            png = await asyncio.to_thread(
+                render_flow,
+                snap,
+                lang=lang,
+                tz=settings.tz,
+                now=now,
+                stale_after_min=settings.stale_after_min,
+            )
+            await message.reply_photo(png, caption=caption, parse_mode=ParseMode.HTML)
+            return
+        except Exception:
+            log.exception("Flow image failed; falling back to text")
+    await _reply(update, caption)
 
 
 async def _graph_points(bd: dict[str, Any], start: datetime, end: datetime) -> list[HistoryPoint]:

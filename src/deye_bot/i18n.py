@@ -7,7 +7,7 @@ SUPPORTED: tuple[Lang, ...] = ("en", "uk")
 
 _HELP_EN = (
     "<b>Deye inverter monitor</b>\n\n"
-    "/status - current power flow and battery level\n"
+    "/status - current status with a power-flow diagram\n"
     "/graph [hours] - chart for the last 1-48 hours (default 24)\n"
     "/threshold [value] - show or set the battery alert level, %\n"
     "/lang [en|uk] - show or set the interface language\n"
@@ -15,7 +15,7 @@ _HELP_EN = (
 )
 _HELP_UK = (
     "<b>Моніторинг інвертора Deye</b>\n\n"
-    "/status - поточні потоки потужності та заряд батареї\n"
+    "/status - поточний стан зі схемою потоків потужності\n"
     "/graph [години] - графік за останні 1-48 годин (типово 24)\n"
     "/threshold [значення] - показати або змінити поріг сповіщення про заряд, %\n"
     "/lang [en|uk] - показати або змінити мову інтерфейсу\n"
@@ -58,6 +58,18 @@ MESSAGES: dict[Lang, dict[str, str]] = {
             "Grid: imported {import_kwh} kWh, exported {export_kwh} kWh\n"
             "Battery: charged {charge_kwh} kWh, discharged {discharge_kwh} kWh"
         ),
+        "flow.pv": "Solar",
+        "flow.grid": "Grid",
+        "flow.battery": "Battery",
+        "flow.home": "Home",
+        "flow.grid_import": "importing",
+        "flow.grid_export": "exporting",
+        "flow.grid_idle": "idle",
+        "flow.state_charging": "charging",
+        "flow.state_discharging": "discharging",
+        "flow.state_idle": "idle",
+        "flow.updated": "{time} · {ago}",
+        "flow.stale": "Outdated data: {time} · {ago}",
         "bot.help": _HELP_EN,
         "bot.not_allowed": "Sorry, you are not allowed to use this bot.",
         "bot.admin_only": "This command is for administrators only.",
@@ -117,6 +129,18 @@ MESSAGES: dict[Lang, dict[str, str]] = {
             "Мережа: взято {import_kwh} кВт·год, віддано {export_kwh} кВт·год\n"
             "Батарея: заряд {charge_kwh} кВт·год, розряд {discharge_kwh} кВт·год"
         ),
+        "flow.pv": "Сонце",
+        "flow.grid": "Мережа",
+        "flow.battery": "Батарея",
+        "flow.home": "Будинок",
+        "flow.grid_import": "з мережі",
+        "flow.grid_export": "у мережу",
+        "flow.grid_idle": "без обміну",
+        "flow.state_charging": "заряджається",
+        "flow.state_discharging": "розряджається",
+        "flow.state_idle": "очікування",
+        "flow.updated": "{time} · {ago}",
+        "flow.stale": "Дані застаріли: {time} · {ago}",
         "bot.help": _HELP_UK,
         "bot.not_allowed": "Вибачте, у вас немає доступу до цього бота.",
         "bot.admin_only": "Ця команда доступна лише адміністраторам.",
