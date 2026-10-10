@@ -25,6 +25,9 @@ def _parser() -> argparse.ArgumentParser:
     d = sub.add_parser("dump", help="print raw and normalized data to verify keys and signs")
     d.add_argument("--station-id", type=int)
     d.add_argument("--device-sn")
+    d.add_argument(
+        "--history", action="store_true", help="also print one station history item (1 API call)"
+    )
     pp = sub.add_parser(
         "portal-probe",
         help="explore the web-portal API (token scrubbed) to share with the maintainer",
@@ -68,11 +71,13 @@ async def discover(settings: Settings) -> None:
             print()
 
 
-async def dump(settings: Settings, station_id: int | None, device_sn: str | None) -> None:
+async def dump(
+    settings: Settings, station_id: int | None, device_sn: str | None, history: bool = False
+) -> None:
     async with _source(settings) as source:
         sid = await source.resolve_station_id(station_id or settings.solarman_station_id)
         sn = device_sn or settings.solarman_device_sn
-        out: dict = {"station_id": sid, **await source.raw_debug(sid, sn)}
+        out: dict = {"station_id": sid, **await source.raw_debug(sid, sn, history)}
         out["snapshot"] = dataclasses.asdict(await source.get_snapshot(sid, sn))
         print(json.dumps(out, indent=2, ensure_ascii=False, default=str))
 
@@ -110,7 +115,7 @@ def main() -> None:
         case "discover":
             asyncio.run(discover(settings))
         case "dump":
-            asyncio.run(dump(settings, args.station_id, args.device_sn))
+            asyncio.run(dump(settings, args.station_id, args.device_sn, args.history))
         case "portal-probe":
             report = asyncio.run(portal_probe(settings, args.station_id))
             if args.out:

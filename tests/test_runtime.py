@@ -72,6 +72,25 @@ def test_outage_needs_two_polls():
     assert not outage_active(snap(), [pt(0)])
 
 
+def test_measured_grid_off_is_an_outage_without_guard():
+    off = replace(snap(), grid_online=False)
+    assert outage_active(off, [])  # no previous sample needed
+    assert outage_active(replace(snap(grid=900), grid_online=False), [])  # flows are irrelevant
+    assert not outage_active(replace(snap(bat=300), grid_online=False), [])  # PV covers the load
+    assert not outage_active(replace(snap(bat=0), grid_online=False), [])
+
+
+def test_measured_grid_on_suppresses_the_heuristic():
+    on = replace(snap(), grid_online=True)  # idle grid + discharging, yet the grid is live
+    assert not outage_active(on, [pt(5)])
+    assert not outage_active(on, [])
+
+
+def test_unknown_grid_state_falls_back_to_the_heuristic():
+    assert not outage_active(replace(snap(), grid_online=None), [])
+    assert outage_active(replace(snap(), grid_online=None), [pt(5)])
+
+
 # ------------------------------------------------------------------ capacity learning
 
 
@@ -542,6 +561,7 @@ async def test_refresh_live_during_outage(env, monkeypatch):
     cur = snap(ts=now - timedelta(minutes=1))
     seed_outage(env, now - timedelta(minutes=1))
     env.storage.add_sample(cur)
+    env.bd["last_snapshot"] = cur
     env.settings.battery_capacity_kwh = CAP
     env.storage.set_json("live_messages", {"-100": 900})
     seen = {}
@@ -574,12 +594,13 @@ async def test_status_and_graph_pass_runtime(env, monkeypatch):
     cur = snap(ts=now - timedelta(minutes=1))
     seed_outage(env, now - timedelta(minutes=1))
     env.storage.add_sample(cur)
+    env.bd["last_snapshot"] = cur
     env.settings.battery_capacity_kwh = CAP
     env.settings.solarman_device_sn = None
     env.settings.solarman_station_id = None
     env.bd["source"] = SimpleNamespace(
         resolve_station_id=lambda c: _aret(1),
-        get_snapshot=lambda *a, **k: _aret(cur),
+        get_snapshot=lambda *a, **k: _aret(cur),  # unused: /status reads the poll cache
         get_history=lambda *a, **k: _aret(series()),
     )
     seen = {}

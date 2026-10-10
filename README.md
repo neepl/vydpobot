@@ -90,11 +90,23 @@ docker compose exec vydpobot vydpobot discover  # on the server (bot running)
 ```
 
 Copy the station `id` into `SOLARMAN_STATION_ID`. Copy the `deviceSn` of the device with type
-**INVERTER** (not COLLECTOR — that's the Wi-Fi stick) into `SOLARMAN_DEVICE_SN`. The SN
-enables a device-level fallback for fields the plant summary leaves empty. For hybrid
-inverters this matters: some plants report battery values only at device level.
+**INVERTER** (not COLLECTOR — that's the Wi-Fi stick) into `SOLARMAN_DEVICE_SN`. With several
+parallel inverters use the **master** inverter's SN. The SN is used **only for grid status**
+(grid voltage and frequency, to tell a real outage from an idle grid). Device values are one
+inverter's share, so they are never mixed into the plant totals (power, load, SOC).
 
 ### 5. Verify battery and grid sign conventions
+
+Verified on real OpenAPI data (2026-10-10), `station/realTime`:
+
+- `purchasePower` is the grid **import**, `gridPower` the **export** (null when not exporting),
+  and `wirePower` only the grid-line magnitude (never subtracted). So
+  `grid_w = purchasePower - gridPower`.
+- Solarman reports **negative** battery power while **charging**, in both `batteryPower` and
+  `chargePower`. So `battery_w = -batteryPower` (or `abs(chargePower) - abs(dischargePower)`
+  when `batteryPower` is absent).
+- The 5-minute history items are assumed to use the same convention; check with
+  `vydpobot dump --history`, which prints one history item.
 
 The bot normalizes to: `battery_w > 0` = charging, `battery_w < 0` = discharging,
 `grid_w > 0` = importing, `grid_w < 0` = exporting. Solarman data differs between setups, so
@@ -112,9 +124,10 @@ At the bottom is the normalized snapshot. `battery_w` must be **positive** while
 importing from the grid (check in the evening with no PV). If it's reversed, set
 `SOLARMAN_INVERT_GRID_SIGN=true`. Re-run `dump` to confirm.
 
-The raw `dataList` section of the dump also shows every key your inverter reports. If SOC or
-battery power comes back empty, compare those keys with `DEVICE_KEYS` in
-`src/vydpobot/solarman/client.py` and adjust.
+The raw `dataList` section of the dump also shows every key your inverter reports, and the
+detected `grid_state`. If grid status comes back empty, compare those keys with `GRID_KEYS` in
+`src/vydpobot/solarman/client.py` and adjust. The bot logs each new `ST_PG1` (Grid Status) text
+once at INFO, so the wording used during an outage can be learned.
 
 ### 6. Limits and freshness
 
@@ -186,7 +199,8 @@ SOLARMAN_PORTAL_REFRESH_TOKEN=<the refresh_token value>
 ```
 
 The OpenAPI settings are not needed in this mode. `SOLARMAN_DEVICE_SN` is ignored (the bot logs a
-warning), because device-level data is not available through the portal. `discover` and `dump`
+warning), because device-level data is not available through the portal, so the grid state
+stays unknown and outages are inferred from the power flows. `discover` and `dump`
 work with both backends. They must share the bot's database, so on the server run them with
 `docker compose exec vydpobot vydpobot …`, not with a different `DB_PATH`.
 
@@ -227,9 +241,26 @@ contains your station and device details.
 ### OpenAPI quota note
 
 The free OpenAPI tier for Smart accounts allows at most 3 plants and 200 000 calls per year
-(about 548 per day). The default 5-minute poll uses 288 calls/day; setting `SOLARMAN_DEVICE_SN`
-doubles that to about 576/day, which is over the quota. The bot logs a warning at startup if
-`SOLARMAN_DEVICE_SN` is set with `POLL_INTERVAL_S` below 600.
+(about 548 per day). Every HTTP request counts, token requests included.
+
+| Call | Cadence | Calls/day |
+| --- | --- | --- |
+| Station realtime | `POLL_INTERVAL_S` = 5 min | 288 |
+| Device grid status (`SOLARMAN_DEVICE_SN`) | `DEVICE_POLL_S` = 10 min | 144 |
+| **Total** | | **432/day, about 158k/year of 200k** |
+
+- `/status` and `/live` use no API calls: they show the latest poll result (or the newest stored
+  sample after a restart).
+- `/graph` uses the stored samples first, when they cover the requested window (oldest sample
+  within 15 min of the start, no gap over 30 min). Otherwise it fetches the API history once and
+  stores those points, so later charts need no API call.
+- If an outage is suspected (grid idle while the battery discharges) the device data is
+  refreshed at once, at most every 5 min.
+- The bot counts requests per local day (stored in the database). At 90% of
+  `SOLARMAN_DAILY_BUDGET` (default 548) the admins get one notice per day; at 100% it skips
+  device polls and history fetches, but never the realtime poll. The daily total is logged at
+  INFO when the day rolls over, and the expected daily calls are logged at startup (with a
+  warning above 90% of the budget).
 
 ## Telegram setup
 

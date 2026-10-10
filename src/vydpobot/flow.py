@@ -243,7 +243,7 @@ def _node_texts(
     if node == "battery" and snap.battery_estimated and watts is not None:
         value = "≈" + value
     sub = ""
-    if node == "grid" and grid_off:
+    if node == "grid" and (grid_off or snap.grid_online is False):
         sub = t(lang, "flow.grid_off")
     elif node == "grid" and watts is not None:
         key = "idle" if direction is None else "export" if watts < 0 else "import"

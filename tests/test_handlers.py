@@ -14,7 +14,8 @@ from telegram_fakes import real_bot_signatures
 from vydpobot import bot as bot_mod
 from vydpobot.alerts import AlertState
 from vydpobot.i18n import MESSAGES, SUPPORTED, Lang, t
-from vydpobot.models import BatteryState, Snapshot
+from vydpobot.models import BatteryState, HistoryPoint, Snapshot
+from vydpobot.quota import ApiQuota
 from vydpobot.storage import KEY_ALERT_STATE, KEY_LANGUAGE, KEY_THRESHOLD, Storage
 
 ADMIN, USER = 7, 8
@@ -78,19 +79,24 @@ class FakeSource:
 
     def __init__(self) -> None:
         self.snapshot_error: Exception | None = None
+        self.snapshot_calls = 0
         self.history_calls = 0
+        self.history_points: list = []
         self.tokens: list[str] = []
 
     async def resolve_station_id(self, configured: int | None) -> int:
         return configured or 1
 
     async def get_snapshot(self, station_id: int, device_sn: str | None = None) -> Snapshot:
+        self.snapshot_calls += 1
         if self.snapshot_error:
             raise self.snapshot_error
         return Snapshot(datetime.now(UTC), 60, 1500, 900, 0, 0, BatteryState.IDLE)
 
     async def get_history(self, station_id: int, start: datetime, end: datetime) -> list:
         self.history_calls += 1
+        if self.history_points:
+            return self.history_points
         raise RuntimeError("cloud history down")
 
     async def set_refresh_token(self, token: str) -> None:
@@ -324,20 +330,86 @@ async def test_graph_without_any_data_still_replies(make_env, lang) -> None:
 
 
 @pytest.mark.parametrize("lang", SUPPORTED)
-async def test_status_live_failure_uses_latest_sample(make_env, lang) -> None:
+async def test_status_uses_latest_sample_without_api_call(make_env, lang) -> None:
     env = make_env("alert_group_user", lang)
-    env.source.snapshot_error = RuntimeError("down")
     (reply,) = await env.run(bot_mod.cmd_status, [])
     assert reply.kind == "photo"
+    assert env.source.snapshot_calls == 0 and env.source.history_calls == 0
+
+
+async def test_status_prefers_cached_poll_snapshot(make_env) -> None:
+    env = make_env("alert_group_user", "en")
+    env.bot_data["last_snapshot"] = Snapshot(
+        datetime.now(UTC), 77, 1, 2, 0, 0, BatteryState.IDLE, grid_online=False
+    )
+    (reply,) = await env.run(bot_mod.cmd_status, [])
+    assert "77%" in reply.text and t("en", "status.grid_down") in reply.text
+    assert env.source.snapshot_calls == 0
 
 
 @pytest.mark.parametrize("lang", SUPPORTED)
-async def test_status_live_failure_and_no_samples(make_env, lang) -> None:
+async def test_status_without_any_sample_reports_error(make_env, lang) -> None:
     env = make_env("alert_group_user", lang)
     env.storage.prune(datetime.now(UTC) + timedelta(days=1))
-    env.source.snapshot_error = RuntimeError("down")
     (reply,) = await env.run(bot_mod.cmd_status, [])
     assert reply.text == html.escape(t(lang, "bot.error"))
+    assert env.source.snapshot_calls == 0
+
+
+# ------------------------------------------------------------------ /graph local coverage
+
+
+def _fill(env, minutes: list[int]) -> None:
+    """Replace stored samples with ones `minutes` ago."""
+    env.storage.prune(datetime.now(UTC) + timedelta(days=1))
+    now = datetime.now(UTC)
+    for m in minutes:
+        ts = now - timedelta(minutes=m)
+        env.storage.add_sample(Snapshot(ts, 60, 1000, 800, 0, -100, BatteryState.DISCHARGING))
+
+
+async def test_graph_locally_covered_makes_no_history_call(make_env) -> None:
+    env = make_env("alert_group_user", "en")
+    _fill(env, list(range(6 * 60, -1, -10)))  # 6 h, every 10 min
+    (reply,) = await env.run(bot_mod.cmd_graph, ["6"])
+    assert reply.kind == "photo" and env.source.history_calls == 0
+
+
+async def test_graph_gap_fetches_history_and_stores_points(make_env) -> None:
+    env = make_env("alert_group_user", "en")
+    _fill(env, [360, 350, 340, 120, 110, 100, 5])  # hole between 340 and 120 min ago
+    now = datetime.now(UTC)
+    fetched = [
+        HistoryPoint(now - timedelta(minutes=m), 55.0, 100.0, 200.0, 0.0, -50.0)
+        for m in (300, 295, 290)
+    ]
+    fetched.append(HistoryPoint(now - timedelta(minutes=285), None, None, None, None, None))
+    env.source.history_points = fetched
+    (reply,) = await env.run(bot_mod.cmd_graph, ["6"])
+    assert reply.kind == "photo" and env.source.history_calls == 1
+    stored = {
+        int(p.ts.timestamp()) for p in env.storage.samples_between(now - timedelta(hours=7), now)
+    }
+    assert {int(p.ts.timestamp()) for p in fetched[:3]} <= stored
+    assert int(fetched[3].ts.timestamp()) not in stored  # frames without data are not stored
+
+
+async def test_graph_stale_start_fetches_history(make_env) -> None:
+    env = make_env("alert_group_user", "en")
+    _fill(env, list(range(60, -1, -10)))  # only the last hour
+    await env.run(bot_mod.cmd_graph, ["6"])
+    assert env.source.history_calls == 1
+
+
+async def test_graph_skips_history_when_budget_exhausted(make_env, tmp_path) -> None:
+    env = make_env("alert_group_user", "en")
+    quota = ApiQuota(env.storage, bot_mod.ZoneInfo("Europe/Kyiv"), 2)
+    quota.record()
+    quota.record()
+    env.source.quota = quota
+    _fill(env, [60, 30, 0])
+    (reply,) = await env.run(bot_mod.cmd_graph, ["6"])
+    assert env.source.history_calls == 0 and reply.kind == "photo"
 
 
 # ------------------------------------------------------------------ /token matrix

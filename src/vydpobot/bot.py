@@ -75,7 +75,9 @@ CAPACITY_REFRESH_S = 3600
 CAPACITY_LOG_DELTA = 0.05
 RUNTIME_MARGIN = timedelta(minutes=10)
 BAR_CELLS = 10
-QUOTA_MIN_POLL_S = 600  # OpenAPI free tier: ~548 calls/day; realtime + device SN doubles usage
+GRAPH_START_TOLERANCE = timedelta(minutes=15)  # oldest local sample vs the window start
+GRAPH_MAX_GAP = timedelta(minutes=30)  # largest hole in local samples before we ask the API
+KEY_LAST_SNAPSHOT = "last_snapshot"  # bot_data: newest snapshot of a successful poll
 DEFAULT_GRAPH_HOURS = 24
 MAX_GRAPH_HOURS = 48
 
@@ -166,6 +168,8 @@ def _status_lines(
 
     if grid_off or runtime is not None:
         grid = t(lang, "runtime.grid_off")
+    elif s.grid_online is False:
+        grid = t(lang, "status.grid_down")  # grid absent but the battery is not carrying the house
     elif s.grid_w is None:
         grid = f"{t(lang, 'flow.grid')}: {na}"
     elif s.grid_w > GRID_IDLE_W:
@@ -483,19 +487,43 @@ def _save_state(storage: Storage, state: AlertState) -> None:
     storage.set_json(KEY_ALERT_STATE, state.to_dict())
 
 
+def expected_daily_calls(settings: Settings) -> int | None:
+    """Expected OpenAPI calls per day (realtime polls + device polls); None for other backends
+    or without a device SN."""
+    if settings.solarman_backend != "openapi" or not settings.solarman_device_sn:
+        return None
+    return 86400 // settings.poll_interval_s + 86400 // settings.device_poll_s
+
+
 def quota_warning(settings: Settings) -> str | None:
-    """Startup warning when OpenAPI polling with a device SN may exceed the free quota."""
-    if (
-        settings.solarman_backend == "openapi"
-        and settings.solarman_device_sn
-        and settings.poll_interval_s < QUOTA_MIN_POLL_S
-    ):
-        return (
-            "SOLARMAN_DEVICE_SN doubles API calls per poll; with POLL_INTERVAL_S="
-            f"{settings.poll_interval_s} this exceeds the free OpenAPI quota "
-            f"(~548 calls/day). Use POLL_INTERVAL_S >= {QUOTA_MIN_POLL_S} or drop the SN."
+    """Startup warning when the expected daily calls exceed 90% of the budget."""
+    expected = expected_daily_calls(settings)
+    if expected is None or expected <= 0.9 * settings.solarman_daily_budget:
+        return None
+    return (
+        f"Expected {expected} Solarman API calls/day exceeds 90% of SOLARMAN_DAILY_BUDGET="
+        f"{settings.solarman_daily_budget}. Raise POLL_INTERVAL_S/DEVICE_POLL_S or drop "
+        "SOLARMAN_DEVICE_SN."
+    )
+
+
+def _log_quota_plan(settings: Settings) -> None:
+    if (expected := expected_daily_calls(settings)) is not None:
+        log.info(
+            "Expected Solarman API calls/day: %d (%d realtime + %d device) of budget %d",
+            expected,
+            86400 // settings.poll_interval_s,
+            86400 // settings.device_poll_s,
+            settings.solarman_daily_budget,
         )
-    return None
+    if warning := quota_warning(settings):
+        log.warning(warning)
+
+
+def latest_snapshot(bd: dict[str, Any]) -> Snapshot | None:
+    """Snapshot of the most recent successful poll (no API call); falls back to the newest
+    stored sample, e.g. right after a restart."""
+    return bd.get(KEY_LAST_SNAPSHOT) or bd["storage"].latest_sample()
 
 
 async def get_station_id(bot_data: dict[str, Any]) -> int:
@@ -523,6 +551,19 @@ def _auth_notice(bot_data: dict[str, Any]) -> list[str]:
 
 
 async def poll_once(bot_data: dict[str, Any], now: datetime) -> PollResult:
+    """One poll cycle (see _poll_once) plus the once-a-day API budget notice. Never raises."""
+    result = await _poll_once(bot_data, now)
+    quota = getattr(bot_data["source"], "quota", None)
+    try:
+        if quota is not None and (count := quota.take_notice()) is not None:
+            text = t(get_lang(bot_data), "quota.notice", count=count, budget=quota.budget)
+            result.admin_notices.append(html.escape(text))
+    except Exception:
+        log.exception("Quota notice failed")
+    return result
+
+
+async def _poll_once(bot_data: dict[str, Any], now: datetime) -> PollResult:
     """One poll cycle. Never raises.
 
     Failures are counted; the 3rd consecutive one yields a single stale notice for the alert
@@ -555,6 +596,7 @@ async def poll_once(bot_data: dict[str, Any], now: datetime) -> PollResult:
         return result
 
     result.snapshot = snap
+    bot_data[KEY_LAST_SNAPSHOT] = snap
     bot_data["fail_count"] = 0
     if storage.get_json(KEY_PORTAL_AUTH_NOTIFIED):
         storage.set_json(KEY_PORTAL_AUTH_NOTIFIED, False)
@@ -768,7 +810,7 @@ async def refresh_live(
 async def _refresh_live_now(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Immediate refresh from the latest stored sample (after /lang, /threshold)."""
     bd = context.application.bot_data
-    await refresh_live(context.bot, bd, bd["storage"].latest_sample())
+    await refresh_live(context.bot, bd, latest_snapshot(bd))
 
 
 # --------------------------------------------------------------------------- handlers
@@ -838,15 +880,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     settings: Settings = bd["settings"]
     lang, now = get_lang(bd), datetime.now(UTC)
-    try:
-        station_id = await get_station_id(bd)
-        snap = await bd["source"].get_snapshot(station_id, settings.solarman_device_sn)
-    except Exception:
-        log.exception("Live status failed")
-        snap = bd["storage"].latest_sample()
-        if snap is None:
-            await _reply(update, html.escape(t(lang, "bot.error")))
-            return
+    snap = latest_snapshot(bd)  # no API call: /status must not spend quota
+    if snap is None:
+        await _reply(update, html.escape(t(lang, "bot.error")))
+        return
     grid_off, runtime = runtime_context(bd, snap, now)
     caption = format_status(
         snap,
@@ -880,7 +917,23 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await _reply(update, caption)
 
 
+def _locally_covered(local: list[HistoryPoint], start: datetime, end: datetime) -> bool:
+    """Stored samples cover the window: oldest within 15 min of the start, no hole > 30 min."""
+    if len(local) < 2 or local[0].ts - start > GRAPH_START_TOLERANCE:
+        return False
+    edges = [start, *(p.ts for p in local), end]
+    return all(b - a <= GRAPH_MAX_GAP for a, b in zip(edges[1:], edges[2:], strict=False))
+
+
 async def _graph_points(bd: dict[str, Any], start: datetime, end: datetime) -> list[HistoryPoint]:
+    storage: Storage = bd["storage"]
+    local = storage.samples_between(start, end)
+    if _locally_covered(local, start, end):
+        return local
+    quota = getattr(bd["source"], "quota", None)
+    if quota is not None and quota.exhausted:
+        log.warning("Solarman API budget exhausted; /graph uses local samples only")
+        return local
     points: list[HistoryPoint] = []
     try:
         station_id = await get_station_id(bd)
@@ -888,8 +941,17 @@ async def _graph_points(bd: dict[str, Any], start: datetime, end: datetime) -> l
     except Exception:
         log.exception("Cloud history failed; using local samples")
     if len(points) < 2:
-        points = bd["storage"].samples_between(start, end)
+        return local
+    try:
+        # Keep fetched frames as samples so later charts need no API call.
+        storage.add_points([p for p in points if _has_data(p)])
+    except Exception:
+        log.exception("Storing history samples failed")
     return points
+
+
+def _has_data(p: HistoryPoint) -> bool:
+    return any(v is not None for v in (p.soc, p.pv_w, p.load_w, p.grid_w, p.battery_w))
 
 
 async def cmd_graph(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -911,7 +973,7 @@ async def cmd_graph(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     now = datetime.now(UTC)
     try:
         points = await _graph_points(bd, now - timedelta(hours=hours), now)
-        latest = bd["storage"].latest_sample()
+        latest = latest_snapshot(bd)
         runtime = runtime_for(bd, latest, now)
         shutdown = float(getattr(settings, "battery_shutdown_soc", 10))
         png = await asyncio.to_thread(
@@ -1016,13 +1078,7 @@ async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             storage.set_json(KEY_LIVE_MESSAGES, live)
             await say("live.stopped")
     else:
-        snap = None
-        try:
-            station_id = await get_station_id(bd)
-            snap = await bd["source"].get_snapshot(station_id, settings.solarman_device_sn)
-        except Exception:
-            log.exception("Live status fetch failed")
-            snap = storage.latest_sample()
+        snap = latest_snapshot(bd)  # no API call
         if snap is None:
             await say("bot.error")
         elif key in live:
@@ -1119,7 +1175,7 @@ async def poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         log.exception("Poll job failed")
     try:
-        snap = result.snapshot or bd["storage"].latest_sample()
+        snap = result.snapshot or latest_snapshot(bd)
         await refresh_live(context.bot, bd, snap)
     except Exception:
         log.exception("Live refresh failed")
@@ -1138,7 +1194,7 @@ async def equipment_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             for msg in result.admin_notices:
                 await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.HTML)
         if result.refresh:
-            await refresh_live(context.bot, bd, bd["storage"].latest_sample())
+            await refresh_live(context.bot, bd, latest_snapshot(bd))
     except Exception:
         log.exception("Equipment job failed")
 
@@ -1146,7 +1202,7 @@ async def equipment_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def _startup_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
     """One-off refresh of the live message(s) shortly after a restart."""
     bd = context.application.bot_data
-    await refresh_live(context.bot, bd, bd["storage"].latest_sample())
+    await refresh_live(context.bot, bd, latest_snapshot(bd))
 
 
 async def prune_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1195,8 +1251,7 @@ async def _post_init(app: Application) -> None:
     settings: Settings = app.bot_data["settings"]
     storage = Storage(settings.db_path)
     app.bot_data.update(source=make_source(settings, storage), storage=storage, fail_count=0)
-    if warning := quota_warning(settings):
-        log.warning(warning)
+    _log_quota_plan(settings)
     if warning := equipment_config_warning(settings):
         log.warning(warning)
     equipment = None

@@ -224,6 +224,11 @@ async def run_cmd(env, args, user=ADMIN, chat_id=CHAT):
     return message, replies
 
 
+def prime(env, **kw):
+    """Cache the snapshot of a (pretend) successful poll, as poll_once does."""
+    env.bd["last_snapshot"] = snap(ts=datetime.now(UTC) - timedelta(minutes=1), **kw)
+
+
 def last_sent(env) -> str:
     return env.bot.sent[-1][1]
 
@@ -236,7 +241,9 @@ def live(env):
 
 
 async def test_live_creates_pins_stores(env):
+    prime(env)
     message, _ = await run_cmd(env, [])
+    assert env.source.calls == 0  # /live never calls the data source
     assert env.bot.photos[0][0] == CHAT
     assert env.bot.pins == [(CHAT, 501, True)]
     assert live(env) == {str(CHAT): 501}
@@ -245,6 +252,7 @@ async def test_live_creates_pins_stores(env):
 
 
 async def test_live_twice_refreshes_not_duplicates(env):
+    prime(env)
     await run_cmd(env, [])
     await run_cmd(env, [])
     assert len(env.bot.photos) == 1
@@ -254,6 +262,7 @@ async def test_live_twice_refreshes_not_duplicates(env):
 
 
 async def test_live_pin_failure_keeps_message(env):
+    prime(env)
     env.bot.pin_error = Forbidden("not enough rights")
     await run_cmd(env, [])
     assert last_sent(env) == html.escape(t("en", "live.no_pin_rights"))
@@ -272,12 +281,14 @@ async def test_live_non_admin_refused(env):
 
 
 async def test_live_other_allowed_chat(env):
+    prime(env)
     await run_cmd(env, [], chat_id=-200)
     await run_cmd(env, [])
     assert set(live(env)) == {"-200", str(CHAT)}
 
 
 async def test_live_off(env):
+    prime(env)
     await run_cmd(env, [])
     message, _ = await run_cmd(env, ["off"])
     assert env.bot.unpins == [(CHAT, 501)]
@@ -293,10 +304,17 @@ async def test_live_off_inactive(env):
 
 
 async def test_live_falls_back_to_stored_sample(env):
-    env.source.error = RuntimeError("down")
+    """Right after a restart there is no cached poll result: use the stored sample."""
     env.storage.add_sample(snap())
     await run_cmd(env, [])
+    assert env.source.calls == 0
     assert live(env) == {str(CHAT): 501}
+
+
+async def test_live_without_any_data_reports_error(env):
+    await run_cmd(env, [])
+    assert env.source.calls == 0 and not env.bot.photos
+    assert last_sent(env) == html.escape(t("en", "bot.error"))
 
 
 # ------------------------------------------------------------------ refresh
@@ -399,6 +417,7 @@ async def test_fake_bot_rejects_calls_the_real_bot_would_reject():
 
 
 async def test_live_passes_checked_at(env, monkeypatch):
+    prime(env)
     seen = []
     real = bot_mod.render_flow
 
@@ -416,7 +435,7 @@ async def test_live_passes_checked_at(env, monkeypatch):
 async def test_post_init_schedules_startup_refresh(env, monkeypatch, tmp_path):
     env.bd["settings"].db_path = tmp_path / "p.db"
     monkeypatch.setattr(bot_mod, "make_source", lambda *a, **k: object())
-    monkeypatch.setattr(bot_mod, "quota_warning", lambda s: None)
+    monkeypatch.setattr(bot_mod, "_log_quota_plan", lambda s: None)
     once, repeating = [], []
 
     class JQ:

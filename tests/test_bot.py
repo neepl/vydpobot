@@ -244,13 +244,51 @@ async def test_non_auth_failure_has_no_admin_notice(bd) -> None:
 
 def test_quota_warning() -> None:
     def cfg(**kw):
-        base = {"solarman_backend": "openapi", "solarman_device_sn": "SN", "poll_interval_s": 300}
+        base = {
+            "solarman_backend": "openapi",
+            "solarman_device_sn": "SN",
+            "poll_interval_s": 300,
+            "device_poll_s": 600,
+            "solarman_daily_budget": 548,
+        }
         return SimpleNamespace(**{**base, **kw})
 
-    assert bot_mod.quota_warning(cfg()) is not None  # type: ignore[arg-type]
-    assert bot_mod.quota_warning(cfg(poll_interval_s=600)) is None  # type: ignore[arg-type]
+    assert bot_mod.expected_daily_calls(cfg()) == 288 + 144  # type: ignore[arg-type]
+    assert bot_mod.quota_warning(cfg()) is None  # type: ignore[arg-type]  # 432 of 548
+    assert bot_mod.quota_warning(cfg(device_poll_s=300)) is not None  # type: ignore[arg-type]
+    assert bot_mod.quota_warning(cfg(solarman_daily_budget=400)) is not None  # type: ignore[arg-type]
     assert bot_mod.quota_warning(cfg(solarman_device_sn=None)) is None  # type: ignore[arg-type]
+    assert bot_mod.expected_daily_calls(cfg(solarman_device_sn=None)) is None  # type: ignore[arg-type]
     assert bot_mod.quota_warning(cfg(solarman_backend="portal")) is None  # type: ignore[arg-type]
+
+
+async def test_poll_caches_latest_snapshot(bd) -> None:
+    s = snap(ts=at(0))
+    bd["source"].queue = [s]
+    await poll_once(bd, at(0))
+    assert bd["last_snapshot"] is s
+    assert bot_mod.latest_snapshot(bd) is s
+
+
+async def test_latest_snapshot_falls_back_to_storage(bd) -> None:
+    assert bot_mod.latest_snapshot(bd) is None
+    bd["storage"].add_sample(snap(ts=at(0)))
+    assert bot_mod.latest_snapshot(bd) is not None
+
+
+async def test_quota_notice_goes_to_admins_once_per_day(bd) -> None:
+    from vydpobot.quota import ApiQuota
+
+    quota = ApiQuota(bd["storage"], bot_mod.ZoneInfo("Europe/Kyiv"), 10)
+    bd["source"].quota = quota
+    bd["source"].queue = [snap(ts=at(0)), snap(ts=at(5)), snap(ts=at(10))]
+    for _ in range(8):
+        quota.record()
+    assert (await poll_once(bd, at(0))).admin_notices == []
+    quota.record()  # 90%
+    (notice,) = (await poll_once(bd, at(5))).admin_notices
+    assert "9" in notice and "10" in notice
+    assert (await poll_once(bd, at(10))).admin_notices == []
 
 
 def test_admin_targets() -> None:

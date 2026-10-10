@@ -1,6 +1,7 @@
 """Async Solarman Cloud OpenAPI client and pure response normalizers."""
 
 import asyncio
+import dataclasses
 import hashlib
 import logging
 import math
@@ -13,7 +14,10 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from vydpobot.config import Settings
-from vydpobot.models import BatteryState, HistoryPoint, Snapshot
+from vydpobot.models import BATTERY_DEADBAND_W, HistoryPoint, Snapshot, battery_state
+from vydpobot.quota import ApiQuota
+from vydpobot.runtime import on_battery
+from vydpobot.storage import Storage
 
 log = logging.getLogger(__name__)
 
@@ -21,12 +25,14 @@ TIMEOUT_S = 20.0
 ATTEMPTS = 3
 BACKOFF_S = 1.0  # doubled after each failed attempt
 TOKEN_REFRESH_MARGIN_S = 3600
-BATTERY_DEADBAND_W = 50.0
 AUTH_BACKOFF_BASE_S = 300.0  # after the 1st rejected login; doubles per consecutive failure
 AUTH_BACKOFF_MAX_S = 3600.0
+OUTAGE_REFRESH_S = 300.0  # min spacing of outage-suspected device refreshes; also the "old" age
+__all__ = ["BATTERY_DEADBAND_W", "battery_state"]  # re-exported for callers/tests
 
-# First key present (with a numeric value) wins. Deye convention for B_P1/BMS_P is
-# +discharge, so the battery value is negated in snapshot_from_device.
+# Used ONLY by `vydpobot dump` (snapshot_from_device): device values are one inverter's share
+# and are never merged into plant totals. First key with a numeric value wins. Deye convention
+# for B_P1/BMS_P is +discharge, so the battery value is negated in snapshot_from_device.
 DEVICE_KEYS: dict[str, tuple[str, ...]] = {
     "soc": ("BMS_SOC", "B_left_cap1"),
     "pv_w": ("S_P_T", "DPi_t1"),
@@ -34,6 +40,18 @@ DEVICE_KEYS: dict[str, tuple[str, ...]] = {
     "grid_w": ("PG_Pt1", "PG_Pt"),
     "battery_w": ("B_P1", "BMS_P"),
 }
+
+# Grid status keys of the device data (Deye hybrid inverter); adjust here if yours differ.
+GRID_KEYS: dict[str, tuple[str, ...]] = {
+    "voltage": ("G_V_L1", "G_V_L2", "G_V_L3"),
+    "voltage_single": ("G_V_L",),  # used only when no per-phase key is present
+    "frequency": ("PG_F1",),
+    "status": ("ST_PG1",),
+}
+GRID_V_ON = 100.0  # any phase above this -> grid present
+GRID_V_OFF = 50.0  # all phases below this (and frequency ~0) -> grid absent
+GRID_F_ON = 40.0
+GRID_F_OFF = 5.0
 
 
 def _monotonic() -> float:
@@ -70,36 +88,36 @@ def _ts(v: object, tz: ZoneInfo) -> datetime:
     return datetime.fromtimestamp(f, tz)
 
 
-def battery_state(battery_w: float | None) -> BatteryState:
-    if battery_w is None:
-        return BatteryState.UNKNOWN
-    if battery_w > BATTERY_DEADBAND_W:
-        return BatteryState.CHARGING
-    if battery_w < -BATTERY_DEADBAND_W:
-        return BatteryState.DISCHARGING
-    return BatteryState.IDLE
+def _station_grid(raw: dict) -> float | None:
+    """Grid power, + = import. Verified on real OpenAPI data (2026-10-10): purchasePower is the
+    import, gridPower the export (null when not exporting) and wirePower only the grid-line
+    magnitude, so it is never used."""
+    buy, sell = _num(raw.get("purchasePower")), _num(raw.get("gridPower"))
+    if buy is None and sell is None:
+        return None
+    return (buy or 0.0) - (sell or 0.0)
 
 
-def _signed(raw: dict, pos: str, neg: str, single: str, invert: bool) -> float | None:
-    """Signed power from a +/- magnitude pair, falling back to the single signed field.
-
-    The pair wins only if one side is non-zero: some plants report 0/0 for the pair while
-    the single field carries the real value.
-    """
-    p, n = _num(raw.get(pos)), _num(raw.get(neg))
-    pair = None if p is None and n is None else (p or 0.0) - (n or 0.0)
-    single_v = _num(raw.get(single))
-    value = pair if pair or single_v is None else single_v
-    return -value if invert and value is not None else value
+def _station_battery(raw: dict) -> float | None:
+    """Battery power, + = charging. Solarman reports NEGATIVE while charging, for both
+    batteryPower and chargePower (verified: chargePower -78 with SOC 100 = slight charge)."""
+    total = _num(raw.get("batteryPower"))
+    if total is not None:
+        return -total
+    charge, discharge = _num(raw.get("chargePower")), _num(raw.get("dischargePower"))
+    if charge is None and discharge is None:
+        return None
+    return abs(charge or 0.0) - abs(discharge or 0.0)
 
 
 def _station_fields(raw: dict, invert_battery: bool, invert_grid: bool) -> dict[str, float | None]:
+    battery, grid = _station_battery(raw), _station_grid(raw)
     return {
         "soc": _num(raw.get("batterySoc")),
         "pv_w": _num(raw.get("generationPower")),
         "load_w": _num(raw.get("usePower")),
-        "grid_w": _signed(raw, "purchasePower", "wirePower", "gridPower", invert_grid),
-        "battery_w": _signed(raw, "chargePower", "dischargePower", "batteryPower", invert_battery),
+        "grid_w": -grid if invert_grid and grid is not None else grid,
+        "battery_w": -battery if invert_battery and battery is not None else battery,
     }
 
 
@@ -137,9 +155,34 @@ def snapshot_from_device(
     )
 
 
+def grid_state_from_device(
+    raw: dict,
+) -> tuple[bool | None, tuple[float, ...] | None, str | None]:
+    """(grid online, per-phase voltages, status text) from device data; None when unknown."""
+    values = _device_values(raw)
+    volts = [v for k in GRID_KEYS["voltage"] if (v := _num(values.get(k))) is not None]
+    if not volts:
+        volts = [v for k in GRID_KEYS["voltage_single"] if (v := _num(values.get(k))) is not None]
+    freq = _first(values, GRID_KEYS["frequency"])
+    raw_status = next((values[k] for k in GRID_KEYS["status"] if values.get(k) is not None), None)
+    status = str(raw_status).strip() or None if raw_status is not None else None
+    online: bool | None = None
+    if any(v > GRID_V_ON for v in volts) or (freq is not None and freq > GRID_F_ON):
+        online = True
+    elif (
+        (volts or freq is not None)
+        and all(v < GRID_V_OFF for v in volts)
+        and (freq is None or freq < GRID_F_OFF)
+    ):
+        online = False
+    return online, tuple(volts) or None, status
+
+
 def history_from_station(
     items: list[dict], tz: ZoneInfo, invert_battery: bool = False, invert_grid: bool = False
 ) -> list[HistoryPoint]:
+    # ASSUMED same convention as realTime (purchasePower/gridPower, negative battery = charging);
+    # verify with `vydpobot dump --history`.
     points = [
         HistoryPoint(
             ts=_ts(i.get("dateTime"), tz), **_station_fields(i, invert_battery, invert_grid)
@@ -189,6 +232,8 @@ class SolarmanClient:
         tz: ZoneInfo,
         invert_battery_sign: bool = False,
         invert_grid_sign: bool = False,
+        device_poll_s: float = 600.0,
+        quota: ApiQuota | None = None,
         http: httpx.AsyncClient | None = None,
     ):
         self._base = base_url.rstrip("/")
@@ -212,9 +257,15 @@ class SolarmanClient:
         self._token_lock = asyncio.Lock()
         self._auth_failures = 0
         self._auth_retry_at = 0.0
+        self._device_poll_s = device_poll_s
+        self.quota = quota
+        # last successful device poll: (monotonic time, online, voltages)
+        self._grid_cache: tuple[float, bool | None, tuple[float, ...] | None] | None = None
+        self._grid_attempt_at: float | None = None  # last device call, ok or not
+        self._seen_grid_status: set[str] = set()
 
     @classmethod
-    def from_settings(cls, s: Settings) -> "SolarmanClient":
+    def from_settings(cls, s: Settings, storage: Storage | None = None) -> "SolarmanClient":
         pw_hash = s.solarman_password_hash
         if not (s.solarman_app_id and s.solarman_app_secret and s.solarman_email and pw_hash):
             raise SolarmanError("OpenAPI credentials are not configured")
@@ -227,6 +278,8 @@ class SolarmanClient:
             tz=s.tz,
             invert_battery_sign=s.solarman_invert_battery_sign,
             invert_grid_sign=s.solarman_invert_grid_sign,
+            device_poll_s=s.device_poll_s,
+            quota=ApiQuota(storage, s.tz, s.solarman_daily_budget) if storage else None,
         )
 
     async def aclose(self) -> None:
@@ -240,6 +293,8 @@ class SolarmanClient:
         url = f"{self._base}{path}"
         for attempt in range(1, ATTEMPTS + 1):
             try:
+                if self.quota is not None:
+                    self.quota.record()
                 resp = await self._http.post(
                     url, params=params, json=body, headers=headers, timeout=TIMEOUT_S
                 )
@@ -348,11 +403,23 @@ class SolarmanClient:
         data = await self._call("/station/v1.0/history", body)
         return data.get("stationDataItems") or []
 
-    async def raw_debug(self, station_id: int, device_sn: str | None = None) -> dict:
-        """Raw realtime (and device, if an SN is given) payloads for `vydpobot dump`."""
+    async def raw_debug(
+        self, station_id: int, device_sn: str | None = None, history: bool = False
+    ) -> dict:
+        """Raw payloads for `vydpobot dump`: realtime, device (with its per-inverter snapshot
+        and grid state) and, with history=True, one sample item of today's history."""
         out: dict = {"station_realtime": await self.station_realtime_raw(station_id)}
         if device_sn:
-            out["device_current"] = await self.device_current_raw(device_sn)
+            raw = await self.device_current_raw(device_sn)
+            out["device_current"] = raw
+            dev = snapshot_from_device(raw, self._tz, self._inv_batt, self._inv_grid)
+            out["device_snapshot_per_inverter"] = dataclasses.asdict(dev)
+            online, volts, status = grid_state_from_device(raw)
+            out["grid_state"] = {"online": online, "voltages": volts, "status": status}
+        if history:
+            items = await self.station_history_raw(station_id, datetime.now(self._tz).date())
+            out["history_item_count"] = len(items)
+            out["history_item_sample"] = items[len(items) // 2] if items else None
         return out
 
     async def resolve_station_id(self, configured: int | None) -> int:
@@ -366,15 +433,56 @@ class SolarmanClient:
         return self._station_id
 
     async def get_snapshot(self, station_id: int, device_sn: str | None = None) -> Snapshot:
-        station = snapshot_from_station(
-            await self.station_realtime_raw(station_id), self._tz, self._inv_batt, self._inv_grid
+        """Plant totals from the station realtime data only. Device data is one inverter's
+        share, so it is used just for the grid-online flag (cached, see _grid_state)."""
+        station = with_estimated_battery(
+            snapshot_from_station(
+                await self.station_realtime_raw(station_id),
+                self._tz,
+                self._inv_batt,
+                self._inv_grid,
+            )
         )
         if not device_sn:
-            return with_estimated_battery(station)
-        device = snapshot_from_device(
-            await self.device_current_raw(device_sn), self._tz, self._inv_batt, self._inv_grid
-        )
-        return with_estimated_battery(merge_snapshots(station, device))
+            return station
+        await self._maybe_poll_device(device_sn, station)
+        online, volts = self._grid_state()
+        return replace(station, grid_online=online, grid_voltage_v=volts)
+
+    def _grid_state(self) -> tuple[bool | None, tuple[float, ...] | None]:
+        """Cached grid state while fresher than 2x device_poll_s, else (None, None)."""
+        if self._grid_cache is None:
+            return None, None
+        at, online, volts = self._grid_cache
+        if _monotonic() - at > 2 * self._device_poll_s:
+            return None, None
+        return online, volts
+
+    async def _maybe_poll_device(self, device_sn: str, station: Snapshot) -> None:
+        now = _monotonic()
+        if self.quota is not None and self.quota.exhausted:
+            return  # non-essential call; skipped at 100% of the daily budget
+        last = self._grid_attempt_at
+        if last is None or now - last >= self._device_poll_s:
+            pass
+        elif on_battery(station) and now - last >= OUTAGE_REFRESH_S:
+            # Looks like an outage: confirm quickly unless a fresh "offline" is already cached.
+            cache = self._grid_cache
+            if cache is not None and cache[1] is False and now - cache[0] <= OUTAGE_REFRESH_S:
+                return
+        else:
+            return
+        self._grid_attempt_at = now
+        try:
+            raw = await self.device_current_raw(device_sn)
+        except SolarmanError as e:
+            log.warning("Device grid status failed: %s", e)
+            return
+        online, volts, status = grid_state_from_device(raw)
+        if status is not None and status not in self._seen_grid_status:
+            self._seen_grid_status.add(status)
+            log.info("Device grid status ST_PG1=%r (grid_online=%s, V=%s)", status, online, volts)
+        self._grid_cache = (_monotonic(), online, volts)
 
     async def get_history(
         self, station_id: int, start: datetime, end: datetime

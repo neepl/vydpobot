@@ -74,7 +74,7 @@ BROWSER_HEADERS = {
     "Accept": "application/json, text/plain, */*",
 }
 # Portal field names -> OpenAPI names understood by snapshot_from_station (only if absent).
-FIELD_ALIASES = {"buyPower": "purchasePower", "sellPower": "wirePower"}
+FIELD_ALIASES = {"buyPower": "purchasePower", "sellPower": "gridPower"}
 
 _JWT_LIKE = re.compile(r"eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{4,})+")
 _TOKEN_PAIR = re.compile(r"""(?i)((?:access|refresh)_token["']?\s*[:=]\s*["']?)[^"'&\s,}]+""")
@@ -540,7 +540,9 @@ class PortalClient:
     ) -> list[HistoryPoint]:
         raise SolarmanError("history not supported by portal backend yet")
 
-    async def raw_debug(self, station_id: int, device_sn: str | None = None) -> dict:
+    async def raw_debug(
+        self, station_id: int, device_sn: str | None = None, history: bool = False
+    ) -> dict:
         return {
             "fast_system": await self._fast_system(station_id),
             "station_summary": await self._station(station_id),

@@ -67,32 +67,49 @@ Pure, unit-testable normalizers (module-level functions):
 def snapshot_from_station(raw: dict, tz, invert_battery=False, invert_grid=False) -> Snapshot
 def snapshot_from_device(raw: dict, tz, invert_battery=False, invert_grid=False) -> Snapshot
 def history_from_station(items: list[dict], tz, invert_battery=False, invert_grid=False) -> list[HistoryPoint]
-def merge_snapshots(primary: Snapshot, fallback: Snapshot) -> Snapshot   # fill None fields of primary
+def merge_snapshots(primary: Snapshot, fallback: Snapshot) -> Snapshot   # fill None fields of primary (portal summary only)
+def grid_state_from_device(raw: dict) -> tuple[bool | None, tuple[float, ...] | None, str | None]  # (online, phase voltages, ST_PG1 text)
 ```
 
 Station field mapping (realTime and history items):
 - `pv_w` <- `generationPower`; `load_w` <- `usePower`; `soc` <- `batterySoc`
-- `battery_w`: if `chargePower`/`dischargePower` present (either non-null) ->
-  `(chargePower or 0) - (dischargePower or 0)`; else `batteryPower` as-is (assumed
-  +charge). Then negate if `invert_battery`.
-- `grid_w`: if `purchasePower`/`wirePower` present -> `(purchasePower or 0) - (wirePower or 0)`;
-  else `gridPower` as-is (assumed +import). Then negate if `invert_grid`.
+- `battery_w` (verified on real OpenAPI data 2026-10-10: Solarman reports NEGATIVE while
+  charging): `-batteryPower` if present; else `abs(chargePower) - abs(dischargePower)` if either
+  is present. Then negate if `invert_battery`. Real sample: `batteryPower -78` -> +78 CHARGING.
+- `grid_w`: `(purchasePower or 0) - (gridPower or 0)` (`purchasePower` = import, `gridPower` =
+  export, null when not exporting; `wirePower` is the grid-line magnitude and is never used);
+  None if both are absent. Then negate if `invert_grid`. Real sample: purchasePower 5306 -> +5306.
+- History items use the same normalization (assumed same convention as realTime; verify with
+  `vydpobot dump --history`).
 - `ts` <- `lastUpdateTime` (realTime) / `dateTime` (history), epoch seconds (float/str), tz-aware.
   If missing use now.
 - battery_state from battery_w with ±50 W deadband (CHARGING / DISCHARGING / IDLE; None -> UNKNOWN).
 
-Device `dataList` mapping (Deye three-phase in Solarman; first key present wins; keep as a
-module-level dict `DEVICE_KEYS` so it is easy to adjust):
-- soc: `BMS_SOC`, `B_left_cap1`
-- pv_w: `S_P_T`, `DPi_t1`
-- load_w: `E_Puse_t1`
-- grid_w: `PG_Pt1`, `PG_Pt` (Deye convention: + import)
-- battery_w: `B_P1`, `BMS_P` (**Deye convention: + discharge -> negate** to match models.py)
-- ts: top-level `collectionTime` (epoch s)
+Device `dataList` is **per inverter** (with parallel inverters it is one unit's share: load
+2185 W vs the plant's 6542 W), so it is never merged into plant totals. `snapshot_from_device`
+and `DEVICE_KEYS` (soc `BMS_SOC`/`B_left_cap1`, pv `S_P_T`/`DPi_t1`, load `E_Puse_t1`, grid
+`PG_Pt1`/`PG_Pt`, battery `B_P1`/`BMS_P` negated) remain for `dump` only.
 
-`get_snapshot`: station realtime; if `device_sn` given, also device currentData and
-`merge_snapshots(station, device)`. If station call yields all-None power fields and no SN,
-still return it (bot shows "n/a").
+Grid state (`grid_state_from_device`, keys in module dict `GRID_KEYS`): phase voltages
+`G_V_L1..3` (or `G_V_L`), frequency `PG_F1`, status text `ST_PG1` (logged at INFO once per
+distinct value). `online` = True if any voltage > 100 V or frequency > 40 Hz; False if all known
+voltages < 50 V and frequency (if known) < 5 Hz; else None (also None without keys).
+`Snapshot.grid_online` / `grid_voltage_v` carry it (None on the portal backend).
+
+`get_snapshot(station_id, device_sn)`: station realtime only for the plant values. With a
+`device_sn`, the device call runs at most every `device_poll_s` (setting, default 600, min 300);
+the last grid state is cached with its time and attached while younger than 2x `device_poll_s`,
+else `None`. If the station data looks like an outage (|grid_w| < 50 and battery discharging)
+and the cache says online or is older than 5 min, the device is refreshed at once (at most once
+per 5 min). A failed device call is logged and leaves the snapshot's grid state unknown.
+
+API accounting (`quota.py`, `ApiQuota`): every Solarman HTTP request (token requests and retries
+included) increments a per-local-day counter persisted in Storage (`api_calls`:
+`{date, count, notified}`). `SOLARMAN_DAILY_BUDGET` (default 548): at 90% `poll_once` adds one
+admin notice per day; at 100% device polls and `/graph` history fetches are skipped (the realtime
+poll never is). The daily total is logged at INFO on day rollover. Startup logs the expected
+calls/day (`86400/poll_interval_s + 86400/device_poll_s` with a device SN) and warns above 90% of
+the budget.
 
 ## __main__.py (Agent A)
 
@@ -237,11 +254,14 @@ Unauthorized -> `bot.not_allowed` (or silently ignore in groups).
 
 Commands (register with `set_my_commands` for both en and uk via `language_code`):
 - `/start`, `/help` -> `bot.help`
-- `/status` -> live `get_snapshot` (fallback: `latest_sample` + stale note); HTML message:
+- `/status` -> NO API call: the snapshot of the latest successful poll (cached in `bot_data` by
+  `poll_once`), else `storage.latest_sample()` (e.g. after a restart); HTML message:
   state line with emoji (⚡ charging / 🔋 discharging / ⏸ idle), ☀️ PV, 🏠 load, 🔌 grid
   (import/export), 🔋 SOC with a 10-cell bar, updated time + "ago"; stale warning if old.
-- `/graph [hours]` (default 24, 1..48) -> `upload_photo` chat action; history from cloud
-  `get_history` (5-min frames); if it fails or returns < 2 points, use `storage.samples_between`;
+- `/graph [hours]` (default 24, 1..48) -> `upload_photo` chat action; local `samples_between` first
+  when they cover the window (oldest sample within 15 min of the start, no gap > 30 min); else
+  cloud `get_history` (5-min frames; skipped at 100% of the API budget), and the fetched points
+  are stored as samples (INSERT OR IGNORE); if it fails or returns < 2 points, use local samples;
   render via `asyncio.to_thread(render_chart, ...)`; send photo with caption = `chart.summary`.
 - `/threshold [value]` (admin to set; anyone allowed may view) -> validate 5..100, persist,
   reset alert state.
@@ -356,9 +376,14 @@ bot.py and `__main__.py` use only `make_source`/`DataSource`.
   history candidates; write scrubbed JSON (tokens removed) to stdout/FILE for the user to share.
 
 ### Quota note (OpenAPI)
-Free tier for Smart accounts: ≤3 plants, ≤200 000 calls/year (~548/day). Default 5-min realtime
-poll = 288/day; enabling `SOLARMAN_DEVICE_SN` doubles it to ~576/day → over quota. Log a startup
-warning if `device_sn` is set and `poll_interval_s < 600`; document in README.
+Free tier for Smart accounts: <=3 plants, <=200 000 calls/year (~548/day). Realtime every 5 min
+= 288/day; device (grid status) every 10 min = 144/day; total 432/day (~158k/year). `/status` and
+`/live` make no API calls; `/graph` uses stored samples first. See "API accounting" above.
+
+Outage detection: when `grid_online` is not None it decides: `outage_active` = (grid_online is
+False) and the battery is discharging, with no flap guard. A grid that is off while the battery is
+not discharging shows "Grid: off" without a runtime estimate. With `grid_online` None the power
+heuristic (idle grid + discharging, two consecutive polls) applies.
 
 ## Building equipment (healthchecks.io) — `equipment.py`
 
@@ -397,8 +422,9 @@ settings: `HEALTHCHECKS_POLL_S` (default 300, min 60), `HEALTHCHECKS_API_URL` (d
 
 - Config: `BATTERY_SHUTDOWN_SOC` (default 10, 0..50), `BATTERY_CAPACITY_KWH` (optional override,
   else learned), `RUNTIME_WINDOW_MIN` (default 120, 15..360).
-- `on_battery(snapshot)`: DISCHARGING and |grid_w| < `GRID_IDLE_W` (50 W). `outage_active`
-  requires the newest stored sample within 15 min to satisfy the same condition (two polls).
+- `on_battery(snapshot)`: DISCHARGING and |grid_w| < `GRID_IDLE_W` (50 W). `outage_active`:
+  if `grid_online` is not None it decides (False + discharging, no guard); otherwise it requires
+  the newest stored sample within 15 min to satisfy the same condition (two polls).
 - `learn_capacity(points)`: segments of consecutive samples (gap <= 20 min, constant battery sign,
   |W| >= 200, SOC monotonic within 0.5 pp jitter, moving >= 3 pp within <= 4 h); capacity =
   trapezoid |kWh| / (|dSOC|/100); median, clamped to 1..1000 kWh; None without segments.

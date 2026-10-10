@@ -51,7 +51,14 @@ def _point_on_battery(p: HistoryPoint) -> bool:
 
 
 def outage_active(current: Snapshot, recent: list[HistoryPoint]) -> bool:
-    """Two consecutive on-battery readings (the newest stored one within 15 min) to avoid flaps."""
+    """Grid outage while the house runs on the battery.
+
+    A measured grid state (`grid_online`, from the inverter's grid voltage) is definitive: no
+    flap guard. Without it, two consecutive on-battery readings (the newest stored one within
+    15 min) are required, inferred from the power flows.
+    """
+    if current.grid_online is not None:
+        return current.grid_online is False and current.battery_state == BatteryState.DISCHARGING
     if not on_battery(current):
         return False
     before = [p for p in recent if p.ts < current.ts and current.ts - p.ts <= CONFIRM_WINDOW]

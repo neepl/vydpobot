@@ -35,8 +35,8 @@ STATION = {
     "batterySoc": 55,
     "buyPower": 0,
     "sellPower": 300,
-    "gridPower": -300,
-    "batteryPower": 900,
+    "gridPower": 300,  # export (positive), like OpenAPI
+    "batteryPower": -900,  # negative = charging
     "lastUpdateTime": 1760000000,
 }
 
@@ -276,14 +276,14 @@ async def test_snapshot_aliases_portal_fields(respx_mock, client):
     fast_down(respx_mock)
     snap = await client.get_snapshot(42)
     assert (snap.pv_w, snap.load_w, snap.soc) == (2000, 800, 55)
-    assert snap.grid_w == -300  # sellPower -> wirePower
+    assert snap.grid_w == -300  # sellPower -> gridPower (export)
     assert snap.battery_w == 900 and snap.battery_state is BatteryState.CHARGING
     assert snap.ts.tzinfo is not None
 
 
 def test_alias_does_not_override_existing_keys():
     out = portal_mod.alias_station({"buyPower": 5, "purchasePower": 7, "sellPower": 1})
-    assert out["purchasePower"] == 7 and out["wirePower"] == 1
+    assert out["purchasePower"] == 7 and out["gridPower"] == 1
 
 
 @respx.mock(assert_all_called=False)

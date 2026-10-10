@@ -42,7 +42,12 @@ class Settings(BaseSettings):
     # password never has to be stored. Set exactly one of the two.
     solarman_password_sha256: SecretStr | None = None
     solarman_station_id: int | None = None  # None -> first station on the account
-    solarman_device_sn: str | None = None  # inverter SN; enables device-level fallback
+    # Master inverter SN; used ONLY for grid status (voltage/frequency), never for plant totals.
+    solarman_device_sn: str | None = None
+    # Device (grid status) call cadence, seconds. Quota: each call counts against the daily budget.
+    device_poll_s: int = Field(default=600, ge=300)
+    # Solarman OpenAPI calls per day (free tier); 90% -> admin notice, 100% -> only realtime polls.
+    solarman_daily_budget: int = Field(default=548, ge=1)
     # Set True if Solarman's batteryPower sign is reversed for your setup
     # (check with `vydpobot dump` while the battery is clearly charging).
     solarman_invert_battery_sign: bool = False

@@ -130,11 +130,13 @@ class FakeChat:
 
 
 class FakeClient:
+    """/status must not touch the source: any call is a failure."""
+
     async def resolve_station_id(self, configured: int | None) -> int:
-        return 1
+        raise AssertionError("/status called the data source")
 
     async def get_snapshot(self, station_id: int, device_sn: str | None = None) -> Snapshot:
-        return snap(50, 1000, 800, 0, 200)
+        raise AssertionError("/status called the data source")
 
 
 def _status_env():
@@ -156,6 +158,7 @@ def _status_env():
         "settings": settings,
         "source": FakeClient(),
         "storage": SimpleNamespace(get_json=lambda *a, **k: None),
+        "last_snapshot": snap(50, 1000, 800, 0, 200),
     }
     context = SimpleNamespace(application=SimpleNamespace(bot_data=bd), args=[])
     return update, context, message, chat

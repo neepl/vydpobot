@@ -714,7 +714,7 @@ def _post_init_env(env, monkeypatch, tmp_path, **kw):
     s.healthchecks_api_url = "https://healthchecks.io"
     s.poll_interval_s = 600
     monkeypatch.setattr(bot_mod, "make_source", lambda *a, **k: object())
-    monkeypatch.setattr(bot_mod, "quota_warning", lambda s: None)
+    monkeypatch.setattr(bot_mod, "_log_quota_plan", lambda s: None)
     jobs = []
 
     class JQ:

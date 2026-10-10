@@ -1,0 +1,130 @@
+{
+ "deviceId": 100000003,
+ "deviceSn": "INV0000003",
+ "deviceType": "INVERTER",
+ "deviceState": 1,
+ "collectionTime": 1791632439,
+ "dataList": [
+  {
+   "name": "Grid Voltage L1",
+   "key": "G_V_L1",
+   "value": "226.50",
+   "unit": "V"
+  },
+  {
+   "name": "Grid Voltage L2",
+   "key": "G_V_L2",
+   "value": "223.40",
+   "unit": "V"
+  },
+  {
+   "name": "Grid Voltage L3",
+   "key": "G_V_L3",
+   "value": "224.10",
+   "unit": "V"
+  },
+  {
+   "name": "Grid Frequency",
+   "key": "PG_F1",
+   "value": "49.95",
+   "unit": "Hz"
+  },
+  {
+   "name": "Grid Status",
+   "key": "ST_PG1",
+   "value": "Purchasing energy",
+   "unit": ""
+  },
+  {
+   "name": "Grid Relay Status",
+   "key": "GRID_RELAY_ST1",
+   "value": "",
+   "unit": ""
+  },
+  {
+   "name": "Total Grid Power",
+   "key": "PG_Pt1",
+   "value": "2266",
+   "unit": "W"
+  },
+  {
+   "name": "Battery Status",
+   "key": "B_ST1",
+   "value": "Charging",
+   "unit": ""
+  },
+  {
+   "name": "Battery Power",
+   "key": "B_P1",
+   "value": "-391",
+   "unit": "W"
+  },
+  {
+   "name": "Battery Capacity",
+   "key": "B_left_cap1",
+   "value": "100",
+   "unit": "%"
+  },
+  {
+   "name": "Total Solar Power",
+   "key": "S_P_T",
+   "value": "544.00",
+   "unit": "W"
+  },
+  {
+   "name": "Total Consumption Power",
+   "key": "E_Puse_t1",
+   "value": "2185",
+   "unit": "W"
+  },
+  {
+   "name": "Load Voltage L1",
+   "key": "C_V_L1",
+   "value": "226.10",
+   "unit": "V"
+  },
+  {
+   "name": "Load Voltage L2",
+   "key": "C_V_L2",
+   "value": "223.60",
+   "unit": "V"
+  },
+  {
+   "name": "Load Voltage L3",
+   "key": "C_V_L3",
+   "value": "224.30",
+   "unit": "V"
+  },
+  {
+   "name": "Load Frequency",
+   "key": "L_F",
+   "value": "50.00",
+   "unit": "Hz"
+  },
+  {
+   "name": "AC Temperature",
+   "key": "AC_T",
+   "value": "42.00",
+   "unit": "℃"
+  },
+  {
+   "name": "Battery Voltage",
+   "key": "B_V1",
+   "value": "57.60",
+   "unit": "V"
+  },
+  {
+   "name": "Parallel Information",
+   "key": "P_INF",
+   "value": "S3",
+   "unit": ""
+  },
+  {
+   "name": "Inverter Mode",
+   "key": "INV_MOD1",
+   "value": "Three phase LV Hybrid",
+   "unit": ""
+  }
+ ],
+ "success": true
+}

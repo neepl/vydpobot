@@ -1,5 +1,5 @@
 {"code": null, "msg": null, "success": true, "total": 3, "stationDataItems": [
  {"dateTime": 1760000700, "generationPower": 100.0, "usePower": 500.0, "purchasePower": 400.0, "wirePower": null, "chargePower": null, "dischargePower": 300.0, "batterySoc": 55.0},
- {"dateTime": 1760000100, "generationPower": "1500", "usePower": 600, "gridPower": -200, "batteryPower": 700, "batterySoc": "56"},
+ {"dateTime": 1760000100, "generationPower": "1500", "usePower": 600, "gridPower": 200, "batteryPower": -700, "batterySoc": "56"},
  {"dateTime": 1760000400, "generationPower": null, "usePower": null, "batterySoc": null}
 ]}

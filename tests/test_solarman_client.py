@@ -46,16 +46,30 @@ def test_station_fixture():
     assert s.battery_state is BatteryState.CHARGING
 
 
+def test_station_real_fixture():
+    """Real OpenAPI realTime (verified 2026-10-10): grid importing 5306 W, battery SOC 100 with a
+    slight charge (Solarman reports NEGATIVE while charging)."""
+    s = snapshot_from_station(fx("openapi_station_realtime_real"), TZ)
+    assert s.ts == datetime.fromtimestamp(1791632439, TZ)
+    assert (s.pv_w, s.load_w, s.soc) == (1164.0, 6542.0, 100.0)
+    assert s.grid_w == 5306.0  # purchasePower - gridPower(null); wirePower is never subtracted
+    assert s.battery_w == 78.0
+    assert s.battery_state is BatteryState.CHARGING
+    assert s.grid_online is None and s.grid_voltage_v is None
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        ({"chargePower": 500, "dischargePower": None, "batteryPower": -999}, 500),
-        ({"chargePower": None, "dischargePower": 300, "batteryPower": 999}, -300),
+        ({"batteryPower": -78, "chargePower": -78, "dischargePower": 0.0}, 78),  # real fixture
+        ({"batteryPower": "400"}, -400),  # positive = discharging
+        ({"chargePower": 500, "dischargePower": None, "batteryPower": -999}, 999),  # total wins
+        ({"chargePower": -500, "dischargePower": None}, 500),
+        ({"chargePower": None, "dischargePower": 300}, -300),
         ({"chargePower": "0", "dischargePower": "250"}, -250),
-        ({"chargePower": 100, "dischargePower": 30}, 70),
-        ({"chargePower": 0, "dischargePower": 0, "batteryPower": 800}, 800),  # 0/0 pair defers
-        ({"chargePower": None, "dischargePower": None, "batteryPower": "-120"}, -120),
-        ({"batteryPower": 80}, 80),
+        ({"chargePower": -100, "dischargePower": 30}, 70),
+        ({"chargePower": 0, "dischargePower": 0, "batteryPower": 800}, -800),
+        ({"batteryPower": "-120"}, 120),
         ({}, None),
         ({"batteryPower": "n/a"}, None),
     ],
@@ -67,12 +81,13 @@ def test_station_battery_sign(raw, expected):
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        ({"purchasePower": 600, "wirePower": None, "gridPower": -5}, 600),
-        ({"purchasePower": None, "wirePower": 200, "gridPower": 5}, -200),
-        ({"purchasePower": "0", "wirePower": "0", "gridPower": 5}, 5),  # 0/0 pair defers
+        ({"purchasePower": 5306, "wirePower": 5306, "gridPower": None}, 5306),  # real fixture
+        ({"purchasePower": 600, "wirePower": None, "gridPower": None}, 600),
+        ({"purchasePower": None, "wirePower": 200, "gridPower": 200}, -200),
+        ({"purchasePower": 600, "gridPower": 100, "wirePower": 500}, 500),
         ({"purchasePower": "0", "wirePower": "0"}, 0),
-        ({"gridPower": "-340"}, -340),
-        ({"gridPower": 90}, 90),
+        ({"gridPower": "340"}, -340),
+        ({"wirePower": 420}, None),  # a magnitude only: no direction, never used
         ({}, None),
     ],
 )
@@ -81,13 +96,13 @@ def test_station_grid_sign(raw, expected):
 
 
 def test_station_invert_flags():
-    raw = station(chargePower=500, purchasePower=100, batterySoc=50)
+    raw = station(chargePower=-500, purchasePower=100, batterySoc=50)
     s = snapshot_from_station(raw, TZ, invert_battery=True, invert_grid=True)
     assert (s.battery_w, s.grid_w) == (-500, -100)
     assert s.battery_state is BatteryState.DISCHARGING
     raw = station(batteryPower=-40, gridPower=70)
     s = snapshot_from_station(raw, TZ, invert_battery=True, invert_grid=True)
-    assert (s.battery_w, s.grid_w) == (40, -70)
+    assert (s.battery_w, s.grid_w) == (-40, 70)
 
 
 def test_station_invert_keeps_none():
@@ -377,16 +392,39 @@ async def test_resolve_no_stations(respx_mock, client):
 
 
 @respx.mock(assert_all_called=False)
-async def test_get_snapshot_merges_device(respx_mock, client):
+async def test_get_snapshot_never_merges_device_powers(respx_mock, client):
+    """Device data is one inverter's share (load 2185 W vs the plant's 6542 W): only the
+    grid flag is taken from it."""
+    mock_token(respx_mock)
+    respx_mock.post(f"{BASE}/station/v1.0/realTime").mock(
+        return_value=httpx.Response(200, json=fx("openapi_station_realtime_real"))
+    )
+    cur = respx_mock.post(f"{BASE}/device/v1.0/currentData").mock(
+        return_value=httpx.Response(200, json=fx("openapi_device_current_real"))
+    )
+    snap = await client.get_snapshot(1, "INV0000003")
+    assert json.loads(cur.calls[0].request.content) == {"deviceSn": "INV0000003"}
+    assert (snap.soc, snap.load_w, snap.pv_w, snap.grid_w, snap.battery_w) == (
+        100.0,
+        6542.0,
+        1164.0,
+        5306.0,
+        78.0,
+    )
+    assert snap.battery_state is BatteryState.CHARGING
+    assert snap.grid_online is True and snap.grid_voltage_v == (226.5, 223.4, 224.1)
+
+
+@respx.mock(assert_all_called=False)
+async def test_station_nulls_not_filled_from_device(respx_mock, client):
     mock_token(respx_mock)
     rt = fx("station_realtime") | {"batterySoc": None, "usePower": None}
     respx_mock.post(f"{BASE}/station/v1.0/realTime").mock(return_value=httpx.Response(200, json=rt))
-    cur = respx_mock.post(f"{BASE}/device/v1.0/currentData").mock(
+    respx_mock.post(f"{BASE}/device/v1.0/currentData").mock(
         return_value=httpx.Response(200, json=fx("device_current"))
     )
-    snap = await client.get_snapshot(1, "2301012345")
-    assert json.loads(cur.calls[0].request.content) == {"deviceSn": "2301012345"}
-    assert (snap.soc, snap.load_w, snap.pv_w, snap.battery_w) == (67, 1190, 2350.5, 750)
+    snap = await client.get_snapshot(1, "SN")
+    assert snap.soc is None and snap.load_w is None
 
 
 @respx.mock(assert_all_called=False)
@@ -528,4 +566,9 @@ async def test_raw_debug(respx_mock, client):
     only_station = await client.raw_debug(1)
     assert set(only_station) == {"station_realtime"}
     both = await client.raw_debug(1, "SN1")
-    assert set(both) == {"station_realtime", "device_current"}
+    assert set(both) == {
+        "station_realtime",
+        "device_current",
+        "device_snapshot_per_inverter",
+        "grid_state",
+    }

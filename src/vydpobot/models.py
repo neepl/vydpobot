@@ -32,6 +32,8 @@ class Snapshot:
     battery_state: BatteryState = BatteryState.UNKNOWN
     battery_estimated: bool = False  # battery_w derived from the energy balance, not measured
     grid_status: str | None = None  # raw portal wireStatus, logged to learn the "grid off" word
+    grid_online: bool | None = None  # from inverter grid voltage/frequency; None = unknown
+    grid_voltage_v: tuple[float, ...] | None = None  # per-phase grid voltages (display/debug)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,3 +46,16 @@ class HistoryPoint:
     load_w: float | None
     grid_w: float | None
     battery_w: float | None
+
+
+BATTERY_DEADBAND_W = 50.0
+
+
+def battery_state(battery_w: float | None) -> BatteryState:
+    if battery_w is None:
+        return BatteryState.UNKNOWN
+    if battery_w > BATTERY_DEADBAND_W:
+        return BatteryState.CHARGING
+    if battery_w < -BATTERY_DEADBAND_W:
+        return BatteryState.DISCHARGING
+    return BatteryState.IDLE

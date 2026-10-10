@@ -9,13 +9,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from vydpobot.models import BatteryState, HistoryPoint, Snapshot
+from vydpobot.models import BatteryState, HistoryPoint, Snapshot, battery_state
 
 KEY_ALERT_STATE = "alert_state"
 KEY_THRESHOLD = "threshold_override"
 KEY_LANGUAGE = "language_override"
 KEY_LIVE_MESSAGES = "live_messages"  # {str(chat_id): message_id} of pinned live-status messages
 KEY_EQUIPMENT_STATE = "equipment_state"  # {check key: {status, down_since, alerted}}
+KEY_API_CALLS = "api_calls"  # {"date", "count", "notified"}: Solarman HTTP requests per local day
 KEY_PORTAL_REFRESH_TOKEN = "portal_refresh_token"  # rotated refresh token (secret)
 KEY_PORTAL_ACCESS = "portal_access"  # {"access", "expires_at"} shared between processes (secret)
 KEY_PORTAL_BOOTSTRAP_SHA = "portal_bootstrap_sha"  # sha256 of the last-seen env bootstrap token
@@ -85,6 +86,28 @@ class Storage:
             )
             self._db.commit()
             return cur.rowcount > 0
+
+    def add_points(self, points: list[HistoryPoint]) -> int:
+        """INSERT OR IGNORE history points as samples; returns how many were new."""
+        rows = [
+            (
+                int(p.ts.timestamp()),
+                p.soc,
+                p.pv_w,
+                p.load_w,
+                p.grid_w,
+                p.battery_w,
+                str(battery_state(p.battery_w)),
+            )
+            for p in points
+        ]
+        with self._lock:
+            before = self._db.total_changes
+            self._db.executemany(
+                f"INSERT OR IGNORE INTO samples({_COLS}) VALUES (?,?,?,?,?,?,?)", rows
+            )
+            self._db.commit()
+            return self._db.total_changes - before
 
     def samples_between(self, start: datetime, end: datetime) -> list[HistoryPoint]:
         with self._lock:

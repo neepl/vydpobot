@@ -126,6 +126,11 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "runtime.lasts": "⏳ Battery lasts ≈ {dur} (until {when})",
         "runtime.capped": "⏳ Battery lasts > 72 h",
         "runtime.grid_off": "Grid: off (running on battery)",
+        "status.grid_down": "Grid: off",
+        "quota.notice": (
+            "Solarman API usage: {count} of {budget} calls today. "
+            "At 100% only realtime polls continue (no device or history calls)."
+        ),
         "runtime.dur.hm": "{h} h {m} min",
         "runtime.dur.h": "{h} h",
         "runtime.dur.m": "{m} min",
@@ -266,6 +271,11 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "runtime.lasts": "⏳ Батареї вистачить ≈ на {dur} (до {when})",
         "runtime.capped": "⏳ Батареї вистачить > 72 год",
         "runtime.grid_off": "Мережа: немає (працюємо від батареї)",
+        "status.grid_down": "Мережа: немає",
+        "quota.notice": (
+            "Використання API Solarman: {count} з {budget} запитів сьогодні. "
+            "При 100% працюють лише запити поточних даних (без пристрою та історії)."
+        ),
         "runtime.dur.hm": "{h} год {m} хв",
         "runtime.dur.h": "{h} год",
         "runtime.dur.m": "{m} хв",
