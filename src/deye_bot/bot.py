@@ -106,11 +106,11 @@ def _status_lines(snapshot: Snapshot, lang: Lang, threshold: float | None) -> li
         state = t(lang, "status.state.unknown")
 
     if s.grid_w is None:
-        grid = f"{t(lang, 'status.grid_import')}: {na}"
+        grid = f"{t(lang, 'flow.grid')}: {na}"
     elif s.grid_w > GRID_IDLE_W:
-        grid = f"{t(lang, 'status.grid_import')}: {power(s.grid_w)}"
+        grid = f"{t(lang, 'status.grid_import')} {power(s.grid_w)}"
     elif s.grid_w < -GRID_IDLE_W:
-        grid = f"{t(lang, 'status.grid_export')}: {power(-s.grid_w)}"
+        grid = f"{t(lang, 'status.grid_export')} {power(-s.grid_w)}"
     else:
         grid = t(lang, "status.grid_idle")
 

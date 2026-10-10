@@ -56,7 +56,7 @@ def test_status_charging_en() -> None:
     assert "⚡" in out
     assert "Charging at 1.20 kW" in out
     assert "☀️" in out and "1.50 kW" in out
-    assert "Grid: exporting: 300 W" in out
+    assert "Grid: exporting 300 W" in out
     assert "Battery 47%" in out
     assert "█████░░░░░" in out
     assert "15:00" in out  # Kyiv is UTC+3 in June
@@ -76,7 +76,7 @@ def test_status_discharging_uk() -> None:
 def test_status_idle_import() -> None:
     out = format_status(snap(grid_w=700), "en", TZ, NOW, 50)
     assert "⏸" in out and "Idle" in out
-    assert "Grid: importing: 700 W" in out
+    assert "Grid: importing 700 W" in out
 
 
 def test_status_none_fields() -> None:
