@@ -73,7 +73,7 @@ List the plants and devices visible to the account:
 
 ```bash
 uv run deye-bot discover                      # local dev
-docker compose run --rm vydpo-bot deye-bot discover  # on the server
+docker compose exec vydpo-bot deye-bot discover  # on the server (bot running)
 ```
 
 Copy the station `id` into `SOLARMAN_STATION_ID`. Copy the `deviceSn` of the device with type
@@ -173,8 +173,8 @@ SOLARMAN_PORTAL_REFRESH_TOKEN=<the refresh_token value>
 
 The OpenAPI settings are not needed in this mode. `SOLARMAN_DEVICE_SN` is ignored (the bot logs a
 warning), because device-level data is not available through the portal. `discover` and `dump`
-work with both backends. They share the bot's database, so run them with `docker compose run --rm`
-while the bot is up, not with a different `DB_PATH`.
+work with both backends. They must share the bot's database, so on the server run them with
+`docker compose exec vydpo-bot deye-bot …`, not with a different `DB_PATH`.
 
 ### When the token stops working
 
@@ -197,7 +197,7 @@ To help implement the real endpoint, run the read-only probe and share its outpu
 maintainer:
 
 ```bash
-uv run deye-bot portal-probe --out probe.json     # or: docker compose run --rm vydpo-bot deye-bot portal-probe
+uv run deye-bot portal-probe --out probe.json     # or: docker compose exec vydpo-bot deye-bot portal-probe
 ```
 
 It renews the token, lists stations and devices, fetches the station details and tries the
@@ -262,28 +262,74 @@ uv run ruff check src tests && uv run ruff format --check src tests
 
 If another virtualenv is active in your shell, prefix commands with `env -u VIRTUAL_ENV`.
 
-## Docker deployment
+## Docker deployment (production)
 
-On the VPS (Docker with the compose plugin):
+The bot runs as a long-lived container: `docker compose up -d` starts it in the background, and
+`restart: unless-stopped` brings it back after a crash or a server reboot. All state (alert
+state, `/threshold` and `/lang` overrides, live-message IDs, the rotated portal token, and
+stored samples) lives in `./data` on the host, so it survives restarts, rebuilds, and updates.
+
+### First deployment (VPS)
+
+1. Install Docker Engine with the compose plugin, and make Docker start on boot:
+   ```bash
+   sudo systemctl enable --now docker
+   ```
+2. Get the code and configure it:
+   ```bash
+   git clone <this repo> vydpo-bot && cd vydpo-bot
+   cp .env.example .env && chmod 600 .env && $EDITOR .env
+   mkdir -p data && sudo chown 10001:10001 data   # the container runs as non-root uid 10001
+   ```
+3. **Stop any other running copy of the bot** (for example `uv run deye-bot run` on your
+   laptop). Telegram allows only one poller per token, otherwise both fail with `Conflict`.
+4. Portal backend only: the refresh token rotates, so a token that another machine already
+   used is dead. Either capture a fresh one for the server (see
+   [Capturing the token](#capturing-the-token)), or stop the local bot and copy its database,
+   which holds the current rotated token:
+   ```bash
+   scp data/deye_bot.sqlite3 vps:vydpo-bot/data/ && ssh vps 'sudo chown 10001:10001 vydpo-bot/data/*'
+   ```
+5. Start it and check it:
+   ```bash
+   docker compose up -d --build
+   docker compose ps                  # STATUS should be "Up"
+   docker compose logs -f vydpo-bot   # Ctrl+C stops following, the bot keeps running
+   ```
+
+### Admin commands against the running bot
+
+Run them **inside** the running container, so they share its database and token:
 
 ```bash
-git clone <this repo> && cd tgbots
-cp .env.example .env && $EDITOR .env
-mkdir -p data && sudo chown 10001:10001 data   # the container runs as non-root uid 10001
-docker compose up -d --build
-docker compose logs -f vydpo-bot
+docker compose exec vydpo-bot deye-bot discover
+docker compose exec vydpo-bot deye-bot dump
+docker compose exec vydpo-bot deye-bot portal-probe
 ```
 
-The SQLite database lives in `./data` (mounted at `/app/data`), so it survives rebuilds.
+(If the bot is stopped, use `docker compose run --rm vydpo-bot deye-bot …` instead: it starts a
+temporary container that is removed afterwards.)
 
-Update:
+### Day-to-day operations
+
+| Task | Command |
+|---|---|
+| Follow logs | `docker compose logs -f --tail 100 vydpo-bot` |
+| Restart (e.g. after editing `.env`) | `docker compose up -d` (re-reads `.env`; `restart` alone does not) |
+| Update to a new version | `git pull && docker compose up -d --build` |
+| Stop temporarily | `docker compose stop` (stays stopped, even after a reboot, until `docker compose start`) |
+| Remove the container | `docker compose down` (`./data` is kept; `up -d` recreates it) |
+
+Logs are rotated (3 × 10 MB).
+
+### Backups
+
+`./data/deye_bot.sqlite3` is the only state worth backing up. In portal mode it also holds the
+live refresh token, so treat backups as secrets. A consistent copy while the bot is running:
 
 ```bash
-git pull
-docker compose up -d --build
+docker compose exec vydpo-bot python -c "import sqlite3; s=sqlite3.connect('/app/data/deye_bot.sqlite3'); d=sqlite3.connect('/app/data/backup.sqlite3'); s.backup(d)"
 ```
-
-Stop: `docker compose down`. Logs are rotated (3 x 10 MB).
 
 ## Bot commands
 
