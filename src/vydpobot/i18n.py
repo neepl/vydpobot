@@ -142,7 +142,12 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "runtime.dur.m": "{m} min",
         "runtime.tomorrow": "tomorrow",
         "flow.grid_off": "grid off",
-        "flow.state_discharging_until": "discharging · until {when}",
+        "flow.eta": "≈ {dur} · until {when}",
+        "flow.eta_capped": "> 72 h",
+        "flow.grid_value_off": "off",
+        "live.grid_off_short": "off",
+        "runtime.summary": "⏳ {dur} (until {when})",
+        "runtime.summary_capped": "⏳ > 72 h",
         "chart.shutdown": "{soc}% shutdown",
         "unit.w": "W",
         "unit.kw": "kW",
@@ -303,7 +308,12 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "runtime.dur.m": "{m} хв",
         "runtime.tomorrow": "завтра",
         "flow.grid_off": "немає мережі",
-        "flow.state_discharging_until": "розряджається · до {when}",
+        "flow.eta": "≈ {dur} · до {when}",
+        "flow.eta_capped": "> 72 год",
+        "flow.grid_value_off": "немає",
+        "live.grid_off_short": "немає",
+        "runtime.summary": "⏳ {dur} (до {when})",
+        "runtime.summary_capped": "⏳ > 72 год",
         "chart.shutdown": "{soc}% вимкнення",
         "unit.w": "Вт",
         "unit.kw": "кВт",
@@ -458,3 +468,11 @@ def fmt_when(
     else:
         text = local.strftime("%d.%m %H:%M")
     return text if short else "~" + text
+
+
+def fmt_until(when: datetime, tz: ZoneInfo, now: datetime) -> str:
+    """End moment: 'HH:MM' when less than 24 h ahead (even tomorrow), else 'dd.mm HH:MM'."""
+    local = when.astimezone(tz)
+    if when - now < timedelta(hours=24):
+        return local.strftime("%H:%M")
+    return local.strftime("%d.%m %H:%M")

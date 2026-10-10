@@ -322,7 +322,9 @@ def test_status_texts():
     assert "🔌 Grid: off (running on battery)" in en
     assert "🔌 Мережа: немає (працюємо від батареї)" in uk
     lines = en.splitlines()
-    assert lines[lines.index("🔋 Battery 60%") + 1].startswith("⏳")
+    bar = next(i for i, ln in enumerate(lines) if ln.startswith("<code>"))
+    assert lines[bar - 1] == "🔋 Battery 60%"
+    assert lines[bar + 1].startswith("⏳")
 
 
 def test_status_tomorrow_and_capped():
@@ -347,20 +349,37 @@ def test_grid_off_without_estimate():
     assert "Grid: off" in out and "⏳" not in out
 
 
+SUMMARY = {
+    "en": ("kW", "off", "5 h 20 min", "until", "> 72 h"),
+    "uk": ("кВт", "немає", "5 год 20 хв", "до", "> 72 год"),
+}
+
+
 @pytest.mark.parametrize("lang", ["en", "uk"])
 def test_summary_and_caption(lang):
+    kw, off, dur, until, over = SUMMARY[lang]
+    dec = "." if lang == "en" else ","
     s = snap(ts=NOW - timedelta(minutes=1))
     plain = bot.format_live_summary(s, lang, TZ, NOW)
-    assert "⏳" not in plain
-    line = bot.format_live_summary(s, lang, TZ, NOW, runtime=RT)
-    assert line == plain + " · ⏳ 23:40"
+    assert "⏳" not in plain and off not in plain and "18:59" in plain  # unchanged
+    head = f"🔋 60% −4{dec}5 · ☀️ 0{dec}0 · 🏠 4{dec}5 {kw} · 🔌 {off}"
+    # tomorrow but within 24 h: clock only
+    tmr = replace(RT, ends_at=END + timedelta(hours=3, minutes=30))  # 03:10 tomorrow
+    line = bot.format_live_summary(s, lang, TZ, NOW, runtime=RT, grid_off=True)
+    assert line == f"{head} · ⏳ {dur} ({until} 23:40)"
+    assert "18:59" not in line
+    tline = bot.format_live_summary(s, lang, TZ, NOW, runtime=tmr, grid_off=True)
+    assert tline == f"{head} · ⏳ {dur} ({until} 03:10)"
+    far = replace(RT, ends_at=NOW + timedelta(hours=25))  # 11.10 20:00 local
+    fline = bot.format_live_summary(s, lang, TZ, NOW, runtime=far, grid_off=True)
+    assert fline.endswith(f"({until} 11.10 20:00)")
+    capd = Runtime(72.0, NOW, 0.1, "current", capped=True)
+    cline = bot.format_live_summary(s, lang, TZ, NOW, runtime=capd, grid_off=True)
+    assert cline == f"{head} · ⏳ {over}"
+    # outage without an estimate: only the word
+    assert bot.format_live_summary(s, lang, TZ, NOW, grid_off=True) == head
     cap = bot.format_live_caption(s, lang, TZ, NOW, 20, runtime=RT, grid_off=True)
     assert cap.split("\n")[0] == line
-    assert "⏳" in cap.split("\n")[3 + 6]  # battery-adjacent estimate line
-    far = replace(RT, ends_at=END + timedelta(hours=5))
-    assert bot.format_live_summary(s, lang, TZ, NOW, runtime=far).endswith("· ⏳ 11.10 04:40")
-    capd = Runtime(72.0, NOW, 0.1, "current", capped=True)
-    assert bot.format_live_summary(s, lang, TZ, NOW, runtime=capd).endswith("· ⏳ >72h")
 
 
 @pytest.mark.parametrize("lang", ["en", "uk"])
@@ -417,11 +436,10 @@ def test_flow_text_clear_with_runtime(lang, rt):
     texts = [b[0] for b in boxes]
     assert any(("grid off" if lang == "en" else "немає мережі") == x for x in texts)
     if rt is not None:
-        want = "~tomorrow 03:10" if rt.ends_at > END + timedelta(hours=1) and lang == "en" else None
         joined = " ".join(texts)
-        assert ("until ~" if lang == "en" else "до ~") in joined
-        if want:
-            assert want in joined
+        eta = "≈ 5 h 20 min · until" if lang == "en" else "≈ 5 год 20 хв · до"
+        assert eta in joined
+        assert ("03:10" if rt is not RT else "23:40") in joined
     segs = [
         seg for node in CORNERS for seg in zip(node_path(node), node_path(node)[1:], strict=False)
     ]
@@ -431,6 +449,90 @@ def test_flow_text_clear_with_runtime(lang, rt):
             lo_x, hi_x = min(xa, xb) - 0.1, max(xa, xb) + 0.1
             lo_y, hi_y = min(ya, yb) - 0.1, max(ya, yb) + 0.1
             assert not (x0 < hi_x and x1 > lo_x and y0 < hi_y and y1 > lo_y), text
+
+
+@pytest.mark.parametrize("lang", ["en", "uk"])
+def test_flow_banner_texts(lang):
+    s = snap(ts=NOW - timedelta(minutes=2))
+    state = "discharging" if lang == "en" else "розряджається"
+    dur, until, over = (
+        ("5 h 20 min", "until", "> 72 h") if lang == "en" else ("5 год 20 хв", "до", "> 72 год")
+    )
+    far = replace(RT, ends_at=NOW + timedelta(hours=25))
+    capd = Runtime(72.0, NOW + timedelta(hours=72), 0.1, "current", capped=True)
+    for rt, want in [
+        (RT, f"≈ {dur} · {until} 23:40"),
+        (replace(RT, ends_at=END + timedelta(hours=3, minutes=30)), f"≈ {dur} · {until} 03:10"),
+        (far, f"≈ {dur} · {until} 11.10 20:00"),
+        (capd, over),
+    ]:
+        fig, ax = build_flow_figure(s, lang=lang, tz=TZ, now=NOW, runtime=rt, grid_off=True)
+        texts = [x.get_text() for x in ax.texts]
+        assert want in texts, (want, texts)
+        assert state in texts  # battery sub-line is one plain line again
+        banner = next(x for x in ax.texts if x.get_text() == want)
+        assert banner.get_fontsize() >= 12 and banner.get_fontweight() == "bold"
+    _, ax = build_flow_figure(s, lang=lang, tz=TZ, now=NOW, grid_off=True)
+    assert not any("≈ 5" in x.get_text() for x in ax.texts)
+
+
+@pytest.mark.parametrize("lang", ["en", "uk"])
+def test_flow_grid_off_value_and_cross(lang):
+    from vydpobot.charts import C_THR
+
+    s = snap(ts=NOW - timedelta(minutes=2))
+    word = "off" if lang == "en" else "немає"
+    for off in (True, False):
+        fig, ax = build_flow_figure(s, lang=lang, tz=TZ, now=NOW, runtime=RT, grid_off=off)
+        reds = [x for x in ax.lines if x.get_color() == C_THR]
+        values = [x for x in ax.texts if x.get_text() == word]
+        if off:
+            assert len(values) == 1 and values[0].get_color() == C_THR
+            assert len(reds) == 1 and reds[0].get_linewidth() == 3.2  # the crossing stroke
+        else:
+            assert not values and not reds
+    _, ax = build_flow_figure(s, lang=lang, tz=TZ, now=NOW, runtime=RT, grid_off=True)
+    sub = "grid off" if lang == "en" else "немає мережі"
+    assert any(x.get_text() == sub for x in ax.texts)
+
+
+def test_flow_grid_off_connection_stays_grey():
+    from vydpobot.charts import GRID_C
+
+    s = replace(snap(ts=NOW - timedelta(minutes=2)), grid_w=900.0)
+    _, ax = build_flow_figure(s, lang="uk", tz=TZ, now=NOW, runtime=RT, grid_off=True)
+    xs, _ = zip(*node_path("grid"), strict=True)
+    grey = [ln for ln in ax.lines if ln.get_color() == GRID_C and list(ln.get_xdata()) == list(xs)]
+    assert len(grey) == 1
+
+
+@pytest.mark.parametrize("lang", ["en", "uk"])
+@pytest.mark.parametrize("soc", [60.0, 100.0])
+def test_flow_long_eta_no_overlap(lang, soc):
+    s = snap(soc=soc, ts=NOW - timedelta(minutes=2))
+    for rt in (
+        Runtime(72.0, NOW + timedelta(hours=71), 0.1, "slope"),  # 72 h, long end date
+        Runtime(71.5, NOW + timedelta(hours=26), 0.1, "slope"),
+        Runtime(72.0, NOW + timedelta(hours=72), 0.1, "slope", capped=True),
+    ):
+        boxes = _text_boxes(s, lang, runtime=rt, grid_off=True)
+        segs = [
+            seg
+            for node in CORNERS
+            for seg in zip(node_path(node), node_path(node)[1:], strict=False)
+        ]
+        for text, x0, y0, x1, y1 in boxes:
+            assert x0 >= 0 and x1 <= 10 and y0 >= 0 and y1 <= 8, text
+            for (xa, ya), (xb, yb) in segs:
+                assert not (
+                    x0 < max(xa, xb) + 0.1
+                    and x1 > min(xa, xb) - 0.1
+                    and y0 < max(ya, yb) + 0.1
+                    and y1 > min(ya, yb) - 0.1
+                ), text
+        for i, a in enumerate(boxes):  # texts do not overlap each other
+            for b in boxes[i + 1 :]:
+                assert not (a[1] < b[3] and a[3] > b[1] and a[2] < b[4] and a[4] > b[2]), (a, b)
 
 
 def test_flow_renders_png():

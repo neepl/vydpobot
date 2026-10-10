@@ -21,7 +21,7 @@ from matplotlib.figure import Figure  # noqa: E402
 from matplotlib.patches import Circle, FancyBboxPatch, Polygon, Rectangle  # noqa: E402
 
 from vydpobot.charts import C_BAT, C_GRID, C_LOAD, C_PV, C_THR, GRID_C, INK, INK_MUTED  # noqa: E402
-from vydpobot.i18n import Lang, fmt_ago, fmt_power, fmt_when, t  # noqa: E402
+from vydpobot.i18n import Lang, fmt_ago, fmt_hm, fmt_power, fmt_until, t  # noqa: E402
 from vydpobot.models import Snapshot  # noqa: E402
 from vydpobot.runtime import Runtime  # noqa: E402
 
@@ -165,6 +165,13 @@ def _icon_grid(ax: Axes, cx: float, cy: float, color: str) -> None:
     )
 
 
+def _icon_crossed(ax: Axes, cx: float, cy: float) -> None:
+    """Diagonal alert-red stroke over an icon (white halo keeps it readable on the bolt)."""
+    xs, ys = [cx - 0.33, cx + 0.33], [cy + 0.33, cy - 0.33]
+    for color, lw, z in (("white", 6.4, 3.5), (C_THR, 3.2, 4)):
+        ax.plot(xs, ys, color=color, linewidth=lw, solid_capstyle="round", zorder=z)
+
+
 def _icon_battery(ax: Axes, cx: float, cy: float, soc: float | None) -> None:
     w, h, pad = 0.62, 0.50, 0.07
     x0, y0 = cx - 0.35, cy - h / 2
@@ -243,6 +250,8 @@ def _node_texts(
     if node == "battery" and snap.battery_estimated and watts is not None:
         value = "≈" + value
     sub = ""
+    if node == "grid" and grid_off:
+        value = t(lang, "flow.grid_value_off")
     if node == "grid" and (grid_off or snap.grid_online is False):
         sub = t(lang, "flow.grid_off")
     elif node == "grid" and watts is not None:
@@ -259,10 +268,40 @@ def _node_texts(
             else "discharging"
         )
         sub = t(lang, f"flow.state_{state}") if state else ""
-        if runtime is not None and not runtime.capped and state == "discharging" and tz and now:
-            when = fmt_when(lang, runtime.ends_at, tz, now)
-            sub = t(lang, "flow.state_discharging_until", when=when)
     return label, value, sub
+
+
+BANNER_Y = 7.2
+BANNER_ROOM = 6.4  # data units, centred on the hub: clears the corner labels and icons
+BANNER_SIZE, BANNER_MIN = 16.0, 12.0
+
+
+def banner_text(runtime: Runtime, lang: Lang, tz: ZoneInfo, now: datetime) -> str:
+    if runtime.capped:
+        return t(lang, "flow.eta_capped")
+    dur = fmt_hm(lang, runtime.hours)
+    return t(lang, "flow.eta", dur=dur, when=fmt_until(runtime.ends_at, tz, now))
+
+
+def _draw_banner(ax: Axes, renderer: RendererBase, text: str) -> None:
+    t_ = ax.text(
+        HUB[0],
+        BANNER_Y,
+        text,
+        ha="center",
+        va="center",
+        fontsize=BANNER_SIZE,
+        color=INK,
+        fontweight="bold",
+        zorder=6,
+    )
+    while t_.get_fontsize() > BANNER_MIN:
+        (x0, _), (x1, _) = ax.transData.inverted().transform(
+            t_.get_window_extent(renderer).get_points()
+        )
+        if x1 - x0 <= BANNER_ROOM:
+            break
+        t_.set_fontsize(t_.get_fontsize() - 0.5)
 
 
 def _draw_node(
@@ -290,6 +329,8 @@ def _draw_node(
         _icon_sun(ax, cx, cy, color)
     elif node == "grid":
         _icon_grid(ax, cx, cy, color)
+        if grid_off:
+            _icon_crossed(ax, cx, cy)
     elif node == "battery":
         _icon_battery(ax, cx, cy, snap.soc)
     else:
@@ -304,23 +345,34 @@ def _draw_node(
         return x1 - x0 <= room
 
     def text(y: float, s: str, size: float, color: str, weight: str = "normal") -> None:
+        multi = "\n" in s
         t_ = ax.text(
-            tx, y, s, ha=ha, va="center", fontsize=size, color=color, fontweight=weight, zorder=6
+            tx,
+            y + 0.05 if multi else y,
+            s,
+            ha=ha,
+            va="top" if multi else "center",
+            fontsize=size,
+            color=color,
+            fontweight=weight,
+            linespacing=1.0,
+            zorder=6,
         )
         # step the font down until the text clears the vertical run
-        while t_.get_fontsize() > MIN_FONT and not fits(t_):
+        floor = MIN_WRAPPED_FONT if multi else MIN_FONT
+        while t_.get_fontsize() > floor and not fits(t_):
             t_.set_fontsize(t_.get_fontsize() - 0.5)
         if not fits(t_) and " · " in s and not top:
             # still too wide at the minimum size: break at the separator into two lines
             t_.set_text(s.replace(" · ", "\n"))
             t_.set_va("top")
-            t_.set_y(y + 0.2)
+            t_.set_y(y + 0.05)
             while t_.get_fontsize() > MIN_WRAPPED_FONT and not fits(t_):
                 t_.set_fontsize(t_.get_fontsize() - 0.5)
 
     if top:
         text(7.62, label, 12, INK_MUTED)
-        text(5.95, value, 19, INK, "bold")
+        text(5.95, value, 19, C_THR if node == "grid" and grid_off else INK, "bold")
         text(5.5, sub, 11, INK_MUTED)
     else:
         text(3.0, value, 19, INK, "bold")
@@ -375,9 +427,11 @@ def build_flow_figure(
     ax.set_ylim(0, H)
     ax.set_axis_off()
     for node, w in watts.items():
-        d = flow_direction(node, w)
+        d = None if node == "grid" and grid_off else flow_direction(node, w)
         _draw_connection(ax, node, w, peak, d)
         _draw_node(ax, renderer, node, snapshot, lang, w, d, runtime, grid_off, tz, now)
+    if runtime is not None:
+        _draw_banner(ax, renderer, banner_text(runtime, lang, tz, now))
     _draw_hub(ax)
     text, stale = _footer(snapshot, lang, tz, now, stale_after_min, checked_at)
     ax.text(

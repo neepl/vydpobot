@@ -47,6 +47,7 @@ from vydpobot.i18n import (
     fmt_hm,
     fmt_num,
     fmt_power,
+    fmt_until,
     fmt_when,
     t,
 )
@@ -207,9 +208,9 @@ def _status_lines(
         f"🔌 {html.escape(grid)}",
         html.escape(bat),
     ]
+    lines.append(f"<code>{soc_bar(s.soc)}</code>")
     if runtime is not None and tz is not None and now is not None:
         lines.append(html.escape(_runtime_line(runtime, lang, tz, now)))
-    lines.append(f"<code>{soc_bar(s.soc)}</code>")
     return lines
 
 
@@ -267,21 +268,36 @@ def format_live_summary(
     now: datetime,
     stale: bool = False,
     runtime: Runtime | None = None,
+    grid_off: bool = False,
 ) -> str:
     """Short first line of the live caption (shown in Telegram's pinned bar)."""
     s = snapshot
     soc = DASH if s.soc is None else f"{s.soc:.0f}%"
     approx = "≈" if s.battery_estimated and s.battery_w is not None else ""
-    parts = [
-        f"🔋 {soc} {approx}{_kw(lang, s.battery_w, signed='battery')}",
-        f"☀️ {_kw(lang, s.pv_w)}",
-        f"🏠 {_kw(lang, s.load_w)}",
-        f"🔌 {_kw(lang, s.grid_w, signed='grid')} {t(lang, 'unit.kw')}",
-        _local(s.ts, tz, now),
-    ]
-    if runtime is not None:
-        until = ">72h" if runtime.capped else fmt_when(lang, runtime.ends_at, tz, now, short=True)
-        parts.append(f"⏳ {until}")
+    outage = grid_off or runtime is not None
+    home = f"🏠 {_kw(lang, s.load_w)}"
+    if outage:
+        parts = [
+            f"🔋 {soc} {approx}{_kw(lang, s.battery_w, signed='battery')}",
+            f"☀️ {_kw(lang, s.pv_w)}",
+            f"{home} {t(lang, 'unit.kw')}",
+            f"🔌 {t(lang, 'live.grid_off_short')}",
+        ]
+        if runtime is not None:
+            if runtime.capped:
+                parts.append(t(lang, "runtime.summary_capped"))
+            else:
+                dur = fmt_hm(lang, runtime.hours)
+                when = fmt_until(runtime.ends_at, tz, now)
+                parts.append(t(lang, "runtime.summary", dur=dur, when=when))
+    else:
+        parts = [
+            f"🔋 {soc} {approx}{_kw(lang, s.battery_w, signed='battery')}",
+            f"☀️ {_kw(lang, s.pv_w)}",
+            home,
+            f"🔌 {_kw(lang, s.grid_w, signed='grid')} {t(lang, 'unit.kw')}",
+            _local(s.ts, tz, now),
+        ]
     return ("⚠️ " if stale else "") + " · ".join(parts)
 
 
@@ -301,7 +317,7 @@ def format_live_caption(
     age = max(0.0, (now - s.ts).total_seconds())
     stale = _is_stale(age, stale_after_min)
     when = s.ts.astimezone(tz).strftime("%d.%m.%Y %H:%M")
-    lines = [format_live_summary(s, lang, tz, now, stale, runtime), ""]
+    lines = [format_live_summary(s, lang, tz, now, stale, runtime, grid_off), ""]
     lines += _status_lines(s, lang, threshold, runtime, grid_off, tz, now)
     check = now.astimezone(tz).strftime("%H:%M")
     tail = ["", html.escape(t(lang, "live.updated", data_time=when, check_time=check))]
