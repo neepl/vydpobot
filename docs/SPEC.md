@@ -1,0 +1,268 @@
+# deye-bot — implementation spec (source of truth for all modules)
+
+Telegram bot monitoring a **Deye three-phase LV hybrid (SUN-xK-SG04LP3)** via the
+**Solarman Cloud OpenAPI**, deployed on a VPS in Docker. Python 3.12, uv, async.
+
+Already written (do not change signatures without reason): `pyproject.toml`,
+`src/deye_bot/models.py` (Snapshot, HistoryPoint, BatteryState + sign conventions),
+`src/deye_bot/config.py` (Settings).
+
+Dev env: project-local `.venv` managed by uv. Always run commands as
+`env -u VIRTUAL_ENV uv run ...` (an unrelated outer venv is active in the shell).
+Do NOT edit pyproject.toml or uv.lock (agents run in parallel); ask the planner in your report if a dep is missing.
+Quality gate: `uv run ruff check src tests && uv run ruff format --check src tests && uv run pytest -q`.
+
+## Module map
+
+```
+src/deye_bot/
+  models.py            (done)
+  config.py            (done)
+  i18n.py              Agent B
+  alerts.py            Agent B   pure state machine, no I/O
+  storage.py           Agent B   sqlite3 (stdlib)
+  charts.py            Agent B   matplotlib -> PNG bytes
+  solarman/client.py   Agent A   async httpx client + normalization
+  __main__.py          Agent A   CLI: run | discover | dump
+  bot.py               Agent C   python-telegram-bot v21 Application, handlers, jobs
+Dockerfile, compose.yaml, .env.example, README.md   Agent C
+```
+
+## solarman/client.py (Agent A)
+
+Solarman OpenAPI v1.x. All calls are `POST {base}{path}?language=en` (token call also has
+`appId=`), JSON body, header `Authorization: bearer <token>`. Responses carry
+`success: bool`, `code`, `msg`; numeric values may be numbers, numeric strings, or null.
+
+```python
+class SolarmanError(Exception):            # .code: str | None
+class SolarmanClient:
+    def __init__(self, *, base_url: str, app_id: str, app_secret: str, email: str,
+                 password: str, tz: ZoneInfo, invert_battery_sign: bool = False,
+                 invert_grid_sign: bool = False, http: httpx.AsyncClient | None = None): ...
+    @classmethod
+    def from_settings(cls, s: Settings) -> "SolarmanClient": ...
+    async def aclose(self) -> None: ...
+    async def list_stations(self) -> list[dict]: ...                 # /station/v1.0/list {"page":1,"size":100} -> stationList
+    async def list_devices(self, station_id: int) -> list[dict]: ... # /station/v1.0/device {"stationId","page":1,"size":100} -> deviceListItems
+    async def station_realtime_raw(self, station_id: int) -> dict: ...      # /station/v1.0/realTime {"stationId"}
+    async def device_current_raw(self, device_sn: str) -> dict: ...         # /device/v1.0/currentData {"deviceSn"} -> dataList[{key,value,unit,name}]
+    async def station_history_raw(self, station_id: int, day: date) -> list[dict]: ...
+        # /station/v1.0/history {"stationId","startTime":"YYYY-MM-DD","endTime":same,"timeType":1} -> stationDataItems (5-min frames)
+    async def resolve_station_id(self, configured: int | None) -> int: ...  # configured or first station; cache it
+    async def get_snapshot(self, station_id: int, device_sn: str | None = None) -> Snapshot: ...
+    async def get_history(self, station_id: int, start: datetime, end: datetime) -> list[HistoryPoint]: ...
+        # fetch every local-tz calendar day overlapping [start,end], normalize, filter, sort by ts
+```
+
+Token: `POST /account/v1.0/token?appId=..&language=en` body
+`{"appSecret", "email", "password": sha256(password).hexdigest()}` -> `access_token`,
+`expires_in` (seconds, may be string). Cache; refresh 1h before expiry; on HTTP 401 or a
+token-related error, refresh once and retry. Network errors / 5xx: 3 attempts, exponential
+backoff. Timeout 20 s. Never log secrets or the token.
+
+Pure, unit-testable normalizers (module-level functions):
+
+```python
+def snapshot_from_station(raw: dict, tz, invert_battery=False, invert_grid=False) -> Snapshot
+def snapshot_from_device(raw: dict, tz, invert_battery=False, invert_grid=False) -> Snapshot
+def history_from_station(items: list[dict], tz, invert_battery=False, invert_grid=False) -> list[HistoryPoint]
+def merge_snapshots(primary: Snapshot, fallback: Snapshot) -> Snapshot   # fill None fields of primary
+```
+
+Station field mapping (realTime and history items):
+- `pv_w` <- `generationPower`; `load_w` <- `usePower`; `soc` <- `batterySoc`
+- `battery_w`: if `chargePower`/`dischargePower` present (either non-null) ->
+  `(chargePower or 0) - (dischargePower or 0)`; else `batteryPower` as-is (assumed
+  +charge). Then negate if `invert_battery`.
+- `grid_w`: if `purchasePower`/`wirePower` present -> `(purchasePower or 0) - (wirePower or 0)`;
+  else `gridPower` as-is (assumed +import). Then negate if `invert_grid`.
+- `ts` <- `lastUpdateTime` (realTime) / `dateTime` (history), epoch seconds (float/str), tz-aware.
+  If missing use now.
+- battery_state from battery_w with ±50 W deadband (CHARGING / DISCHARGING / IDLE; None -> UNKNOWN).
+
+Device `dataList` mapping (Deye three-phase in Solarman; first key present wins; keep as a
+module-level dict `DEVICE_KEYS` so it is easy to adjust):
+- soc: `BMS_SOC`, `B_left_cap1`
+- pv_w: `S_P_T`, `DPi_t1`
+- load_w: `E_Puse_t1`
+- grid_w: `PG_Pt1`, `PG_Pt` (Deye convention: + import)
+- battery_w: `B_P1`, `BMS_P` (**Deye convention: + discharge -> negate** to match models.py)
+- ts: top-level `collectionTime` (epoch s)
+
+`get_snapshot`: station realtime; if `device_sn` given, also device currentData and
+`merge_snapshots(station, device)`. If station call yields all-None power fields and no SN,
+still return it (bot shows "n/a").
+
+## __main__.py (Agent A)
+
+argparse subcommands, `asyncio.run` where needed, settings via `get_settings()`:
+- `run` -> `from deye_bot.bot import run; run(settings)` (lazy import; bot.py written by Agent C)
+- `discover` -> print stations (id, name, location, capacity) and each station's devices
+  (deviceSn, deviceType, deviceId) as a readable table. Should only need Solarman settings —
+  but Settings requires Telegram fields too; that's acceptable (document dummy values).
+- `dump [--station-id N] [--device-sn SN]` -> pretty JSON of raw realtime, raw device data
+  (if SN), and the normalized Snapshot. Used by the user to verify sign conventions/keys.
+Logging: `logging.basicConfig(level=INFO)`, quiet httpx to WARNING.
+
+## i18n.py (Agent B)
+
+```python
+Lang = Literal["en", "uk"]
+SUPPORTED: tuple[Lang, ...] = ("en", "uk")
+def t(lang: Lang, key: str, **kwargs) -> str   # falls back to "en", then to key itself
+```
+Flat dict catalogs `MESSAGES: dict[Lang, dict[str, str]]`, `str.format` placeholders. Ukrainian
+must be natural, correct Ukrainian (not machine-literal). Both catalogs must have identical key
+sets (add a test). Required keys (add more if needed, Agent C may add bot-specific ones —
+coordinate by keeping keys namespaced):
+
+- status: `status.title`, `status.updated` ({time}, {ago}), `status.pv`, `status.load`,
+  `status.grid_import`, `status.grid_export`, `status.grid_idle`, `status.battery`
+  ({soc}), `status.state.charging` ({power}), `status.state.discharging` ({power}),
+  `status.state.idle`, `status.state.unknown`, `status.na`, `status.stale_warning` ({ago})
+- alerts: `alert.drop` ({soc}, {level}, {power}), `alert.recovered` ({soc}),
+  `alert.stale` ({ago}), `alert.back_online`
+- chart: `chart.title` ({hours}), `chart.power_axis` (kW), `chart.soc_axis`, `chart.pv`,
+  `chart.load`, `chart.battery`, `chart.grid`, `chart.threshold`, `chart.no_data`,
+  `chart.summary` ({pv_kwh}, {load_kwh}, {import_kwh}, {export_kwh}, {charge_kwh}, {discharge_kwh})
+- bot: `bot.help`, `bot.not_allowed`, `bot.admin_only`, `bot.threshold.current` ({threshold}, {step}),
+  `bot.threshold.set` ({threshold}), `bot.threshold.invalid`, `bot.lang.current` ({lang}),
+  `bot.lang.set`, `bot.lang.invalid`, `bot.error` , `bot.graph.invalid`
+- units/time helpers: `unit.w`, `unit.kw`, `time.ago.min` ({n}), `time.ago.h` ({n}), `time.just_now`
+
+Helpers in i18n.py:
+`fmt_power(lang, watts: float|None) -> str` ("850 W" / "3.42 kW"; uk "850 Вт" / "3,42 кВт"
+— Ukrainian uses decimal comma), `fmt_ago(lang, seconds) -> str`.
+
+## alerts.py (Agent B) — pure, no I/O
+
+Levels: `threshold, threshold-step, threshold-2*step, ...` (> 0). Float-safe (epsilon 1e-6).
+
+```python
+@dataclass
+class AlertState:
+    next_level: float | None = None   # alert when soc <= next_level; None -> == threshold
+    in_alert: bool = False            # at least one drop alert sent in this cycle
+    stale_notified: bool = False
+    def to_dict(self) -> dict; @classmethod from_dict(cls, d: dict | None) -> "AlertState"
+
+@dataclass(frozen=True)
+class AlertEvent:
+    kind: Literal["drop", "recovered", "stale", "back_online"]
+    soc: float | None = None
+    level: float | None = None
+    stale_seconds: float | None = None
+
+def evaluate_soc(state, soc: float | None, threshold, step, hysteresis) -> tuple[AlertState, list[AlertEvent]]
+def evaluate_staleness(state, data_ts: datetime, now: datetime, stale_after_min: int) -> tuple[AlertState, list[AlertEvent]]
+```
+
+`evaluate_soc` semantics (A = next_level or threshold, clamp A <= threshold):
+1. soc None -> no change.
+2. **Drop**: if soc <= A: crossed level `L = threshold - step*floor((threshold - soc)/step)`
+   (soc 47, thr 50, step 5 -> L=50; soc 44 -> 45; soc 45 -> 45). Emit ONE `drop(soc, L)`
+   (even if several levels were skipped between polls), set `next_level = L - step`,
+   `in_alert = True`. If `L - step <= 0`, next_level stays at a sentinel that never fires again
+   until re-armed (e.g. 0 or negative is fine since soc>=0 — but soc 0 <= 0 must not spam:
+   only fire when L < previous A, i.e. strictly new level).
+3. **Full recovery**: if soc >= threshold + hysteresis: if in_alert emit `recovered(soc)`;
+   reset to `AlertState(stale_notified=state.stale_notified)`.
+4. **Partial re-arm** (soc rose but not fully recovered): `cand` = largest level <= soc - hysteresis;
+   `next_level = min(threshold, max(A, cand))`. Example thr 50/step 5/hyst 5: alerted 30
+   (A=25), charges to 45 -> cand 40 -> A=40 -> later drop to 40 alerts again. Oscillation
+   30<->31 never re-alerts.
+Changing threshold at runtime: bot resets state to `AlertState()` keeping stale_notified.
+
+`evaluate_staleness`: disabled if stale_after_min == 0. If `now - data_ts > stale_after_min`
+and not stale_notified -> emit `stale(stale_seconds)`, set flag. If fresh again and flag set ->
+emit `back_online`, clear flag.
+
+Thorough parametrized tests including the examples above, skipped levels, soc 0, hysteresis 0,
+round-trip to_dict/from_dict.
+
+## storage.py (Agent B) — stdlib sqlite3, sync (tiny), thread-safe enough via one connection with check_same_thread=False + a Lock
+
+```python
+class Storage:
+    def __init__(self, path: Path): ...      # mkdir parents, WAL, create schema
+    def close(self) -> None
+    def add_sample(self, s: Snapshot) -> bool                    # INSERT OR IGNORE by ts (epoch int UTC); True if new
+    def samples_between(self, start: datetime, end: datetime) -> list[HistoryPoint]   # sorted, tz-aware UTC
+    def latest_sample(self) -> Snapshot | None
+    def prune(self, older_than: datetime) -> int
+    def get_json(self, key: str, default=None) -> Any
+    def set_json(self, key: str, value: Any) -> None
+```
+Keys used by the bot (constants in storage.py): `KEY_ALERT_STATE = "alert_state"`,
+`KEY_THRESHOLD = "threshold_override"`, `KEY_LANGUAGE = "language_override"`.
+Schema: `samples(ts INTEGER PRIMARY KEY, soc REAL, pv_w REAL, load_w REAL, grid_w REAL, battery_w REAL, battery_state TEXT)`,
+`kv(key TEXT PRIMARY KEY, value TEXT)`. Tests with tmp_path.
+
+## charts.py (Agent B)
+
+```python
+def render_chart(points: list[HistoryPoint], *, tz: ZoneInfo, lang: Lang, hours: int,
+                 threshold: float | None = None, now: datetime | None = None) -> bytes  # PNG
+def summarize(points: list[HistoryPoint]) -> dict[str, float]
+    # kWh via trapezoid integration, ignoring gaps > 20 min between points.
+    # keys: pv_kwh, load_kwh, import_kwh, export_kwh, charge_kwh, discharge_kwh
+```
+Use `matplotlib.use("Agg")` + `matplotlib.figure.Figure` (no pyplot global state; called from
+a worker thread via asyncio.to_thread). ~1200x800 px, dpi 100-150. Two stacked axes sharing x
+(height ratio ~2:1):
+- top: power in kW: PV (filled area, amber `#E8A33D`), Load (line, blue `#3B7DD8`),
+  Battery signed (+charge, line, green `#3BA55C`), Grid signed (+import, thin line, grey
+  `#8A8F98`), zero line. Legend.
+- bottom: SOC % (green line, y 0-100), dashed threshold line (`#D64545`) if given.
+- x axis in local tz, `HH:MM`, range [now-hours, now]. None values -> NaN gaps; also break
+  lines across gaps > 20 min. Empty points -> chart with centered `chart.no_data` text.
+- Labels/legend/title from i18n `t(lang, ...)`. Font must render Cyrillic (DejaVu Sans,
+  matplotlib default, does).
+Tests: returns PNG bytes (starts with b"\x89PNG") for normal, empty, all-None, and uk lang;
+summarize math on a synthetic constant-power series.
+
+## bot.py (Agent C)
+
+python-telegram-bot v21 (async, `Application`, `JobQueue`). `def run(settings: Settings) -> None`
+builds app with `post_init` (create SolarmanClient, Storage, resolve station id, store in
+`app.bot_data`) and `post_shutdown` (close client & storage), `run_polling()`.
+
+Effective runtime values: threshold = `storage KEY_THRESHOLD` or settings; language =
+`storage KEY_LANGUAGE` or settings.
+
+Access control: read-only commands allowed in `alert_chat_id`, `allowed_chat_ids`, or private
+chats of `admin_user_ids`; admin commands need `effective_user.id in admin_user_ids`.
+Unauthorized -> `bot.not_allowed` (or silently ignore in groups).
+
+Commands (register with `set_my_commands` for both en and uk via `language_code`):
+- `/start`, `/help` -> `bot.help`
+- `/status` -> live `get_snapshot` (fallback: `latest_sample` + stale note); HTML message:
+  state line with emoji (⚡ charging / 🔋 discharging / ⏸ idle), ☀️ PV, 🏠 load, 🔌 grid
+  (import/export), 🔋 SOC with a 10-cell bar, updated time + "ago"; stale warning if old.
+- `/graph [hours]` (default 24, 1..48) -> `upload_photo` chat action; history from cloud
+  `get_history` (5-min frames); if it fails or returns < 2 points, use `storage.samples_between`;
+  render via `asyncio.to_thread(render_chart, ...)`; send photo with caption = `chart.summary`.
+- `/threshold [value]` (admin to set; anyone allowed may view) -> validate 5..100, persist,
+  reset alert state.
+- `/lang [en|uk]` (admin to set) -> persist.
+Jobs:
+- `poll` every `poll_interval_s` (first after 10 s): get_snapshot -> add_sample ->
+  evaluate_soc (only if sample is new, i.e. logger reported fresh data) -> evaluate_staleness ->
+  persist state -> send events to alert_chat_id. Exceptions logged, never crash the job;
+  after 3 consecutive poll failures send one `alert.stale`-like error note (reuse staleness flag).
+- `prune` daily: keep 14 days of samples.
+Global error handler logs exceptions. Use `parse_mode=HTML` and escape dynamic text.
+
+## Deployment (Agent C)
+
+- `Dockerfile`: multi-stage with `ghcr.io/astral-sh/uv:python3.12-bookworm-slim` builder
+  (`uv sync --frozen --no-dev --no-editable`), runtime `python:3.12-slim-bookworm`, copy
+  `/app/.venv`, non-root user, `TZ` support (tzdata is in python image? ensure `tzdata` pip pkg
+  or apt), `VOLUME /app/data`, `CMD ["deye-bot", "run"]`. MPLCONFIGDIR=/tmp/matplotlib.
+- `compose.yaml`: service `deye-bot`, `env_file: .env`, `restart: unless-stopped`, volume
+  `./data:/app/data`, log rotation.
+- `.env.example` with every Settings field documented.
+- `README.md`: overview, **Solarman API access guide** (section text will be supplied by the
+  planner — leave a `<!-- SOLARMAN_GUIDE -->` placeholder), BotFather setup, getting chat ids,
+  `discover`/`dump` workflow incl. verifying battery/grid sign, local dev with uv, docker deploy.
