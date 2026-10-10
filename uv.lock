@@ -148,43 +148,6 @@ wheels = [
 ]
 
 [[package]]
-name = "deye-bot"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "httpx" },
-    { name = "matplotlib" },
-    { name = "pydantic-settings" },
-    { name = "python-telegram-bot", extra = ["job-queue"] },
-    { name = "tzdata" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "respx" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "matplotlib", specifier = ">=3.9" },
-    { name = "pydantic-settings", specifier = ">=2.7" },
-    { name = "python-telegram-bot", extras = ["job-queue"], specifier = ">=21.6" },
-    { name = "tzdata", specifier = ">=2026.5" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8" },
-    { name = "pytest-asyncio", specifier = ">=0.24" },
-    { name = "respx", specifier = ">=0.21" },
-    { name = "ruff", specifier = ">=0.6" },
-]
-
-[[package]]
 name = "fonttools"
 version = "4.66.1"
 source = { registry = "https://pypi.org/simple" }
@@ -936,4 +899,41 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/81/5b/879b2f932adfa7a053c360d50bc896c977fa6426109185f7c12ebdd0cb9d/tzlocal-5.4.4.tar.gz", hash = "sha256:8dbb8660838688a7b6ba4fed31d18dedf842afb4d47ca050d6d891c2c15f3be4", size = 31170, upload-time = "2026-06-29T08:03:40.026Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9e/a4/017a7a6cbe387d961a688ec31364ae60a5c4e22c96ae9921b79a947c855d/tzlocal-5.4.4-py3-none-any.whl", hash = "sha256:aae09f0126a8a86fa736be266eb4a471380d26a0de3bc14844e7821fee3e2a15", size = 18115, upload-time = "2026-06-29T08:03:38.666Z" },
+]
+
+[[package]]
+name = "vydpo-bot"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "httpx" },
+    { name = "matplotlib" },
+    { name = "pydantic-settings" },
+    { name = "python-telegram-bot", extra = ["job-queue"] },
+    { name = "tzdata" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "respx" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "matplotlib", specifier = ">=3.9" },
+    { name = "pydantic-settings", specifier = ">=2.7" },
+    { name = "python-telegram-bot", extras = ["job-queue"], specifier = ">=21.6" },
+    { name = "tzdata", specifier = ">=2026.5" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "respx", specifier = ">=0.21" },
+    { name = "ruff", specifier = ">=0.6" },
 ]

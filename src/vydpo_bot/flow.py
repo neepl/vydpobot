@@ -20,9 +20,9 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 from matplotlib.patches import Circle, FancyBboxPatch, Polygon, Rectangle  # noqa: E402
 
-from deye_bot.charts import C_BAT, C_GRID, C_LOAD, C_PV, C_THR, GRID_C, INK, INK_MUTED  # noqa: E402
-from deye_bot.i18n import Lang, fmt_ago, fmt_power, t  # noqa: E402
-from deye_bot.models import Snapshot  # noqa: E402
+from vydpo_bot.charts import C_BAT, C_GRID, C_LOAD, C_PV, C_THR, GRID_C, INK, INK_MUTED  # noqa: E402
+from vydpo_bot.i18n import Lang, fmt_ago, fmt_power, t  # noqa: E402
+from vydpo_bot.models import Snapshot  # noqa: E402
 
 Node = Literal["pv", "grid", "battery", "home"]
 Direction = Literal["to_hub", "from_hub"]

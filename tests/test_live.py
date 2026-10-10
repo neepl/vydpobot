@@ -10,10 +10,10 @@ import pytest
 from telegram.error import BadRequest, Forbidden, NetworkError
 from telegram_fakes import real_bot_signatures
 
-from deye_bot import bot as bot_mod
-from deye_bot.i18n import t
-from deye_bot.models import BatteryState, Snapshot
-from deye_bot.storage import KEY_LIVE_MESSAGES, Storage
+from vydpo_bot import bot as bot_mod
+from vydpo_bot.i18n import t
+from vydpo_bot.models import BatteryState, Snapshot
+from vydpo_bot.storage import KEY_LIVE_MESSAGES, Storage
 
 ADMIN, USER, CHAT = 7, 8, -100
 PNG = b"\x89PNG\r\n\x1a\n"

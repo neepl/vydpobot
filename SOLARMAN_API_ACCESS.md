@@ -55,8 +55,8 @@ isn't published. Keep the secret private.
    ```
    The keys identify the *application*. The email and password decide *whose plants* it can see,
    so use the read-only test account rather than the plant creator's login.
-2. Run `deye-bot discover`. Your plant should be listed. Copy its `id` to `SOLARMAN_STATION_ID`.
-3. Run `deye-bot dump` while the battery is charging, then check the sign conventions
+2. Run `vydpo-bot discover`. Your plant should be listed. Copy its `id` to `SOLARMAN_STATION_ID`.
+3. Run `vydpo-bot dump` while the battery is charging, then check the sign conventions
    (see [README → Solarman Cloud API access](README.md#solarman-cloud-api-access)).
 
 Accounts on the Chinese Solarman platform use `SOLARMAN_BASE_URL=https://api.solarmanpv.com`.

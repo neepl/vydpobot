@@ -11,14 +11,14 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from deye_bot.config import Settings, get_settings
-from deye_bot.solarman import PortalClient
-from deye_bot.source import DataSource, make_source
-from deye_bot.storage import Storage
+from vydpo_bot.config import Settings, get_settings
+from vydpo_bot.solarman import PortalClient
+from vydpo_bot.source import DataSource, make_source
+from vydpo_bot.storage import Storage
 
 
 def _parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="deye-bot", description=__doc__)
+    p = argparse.ArgumentParser(prog="vydpo-bot", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("run", help="start the Telegram bot")
     sub.add_parser("discover", help="list stations and devices on the Solarman account")
@@ -104,7 +104,7 @@ def main() -> None:
         raise SystemExit(f"Configuration error (check .env):\n{problems}") from None
     match args.command:
         case "run":
-            from deye_bot.bot import run
+            from vydpo_bot.bot import run
 
             run(settings)
         case "discover":

@@ -1,13 +1,15 @@
 """Tiny sqlite3 persistence: samples history and a key-value store."""
 
 import json
+import logging
+import os
 import sqlite3
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from deye_bot.models import BatteryState, HistoryPoint, Snapshot
+from vydpo_bot.models import BatteryState, HistoryPoint, Snapshot
 
 KEY_ALERT_STATE = "alert_state"
 KEY_THRESHOLD = "threshold_override"
@@ -26,6 +28,28 @@ CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT);
 """
 _COLS = "ts, soc, pv_w, load_w, grid_w, battery_w, battery_state"
 
+LEGACY_DB_NAME = "deye_bot.sqlite3"  # pre-rename name; migrated on first start
+_COMPANIONS = ("", "-wal", "-shm", ".portal.lock")
+
+log = logging.getLogger(__name__)
+
+
+def migrate_legacy_db(path: Path) -> bool:
+    """Move a pre-rename `deye_bot.sqlite3` (and its WAL/SHM/lock files) to `path`.
+
+    Only when `path` does not exist yet and the legacy file sits in the same directory, so an
+    existing database is never overwritten. Returns True if a migration happened.
+    """
+    legacy = path.with_name(LEGACY_DB_NAME)
+    if path.exists() or legacy == path or not legacy.exists():
+        return False
+    for suffix in _COMPANIONS:
+        src = legacy.with_name(legacy.name + suffix)
+        if src.exists():
+            os.replace(src, path.with_name(path.name + suffix))
+    log.info("Migrated legacy database %s -> %s", legacy.name, path.name)
+    return True
+
 
 def _utc(epoch: int) -> datetime:
     return datetime.fromtimestamp(epoch, UTC)
@@ -35,6 +59,7 @@ class Storage:
     def __init__(self, path: Path) -> None:
         path = self.path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        migrate_legacy_db(path)
         self._lock = threading.Lock()
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._db.execute("PRAGMA journal_mode=WAL")

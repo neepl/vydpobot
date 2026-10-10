@@ -14,8 +14,8 @@ import matplotlib.dates as mdates  # noqa: E402
 from matplotlib.axes import Axes  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 
-from deye_bot.i18n import Lang, t  # noqa: E402
-from deye_bot.models import HistoryPoint  # noqa: E402
+from vydpo_bot.i18n import Lang, t  # noqa: E402
+from vydpo_bot.models import HistoryPoint  # noqa: E402
 
 MAX_GAP = timedelta(minutes=20)
 C_PV, C_LOAD, C_BAT, C_GRID, C_THR = "#E8A33D", "#3B7DD8", "#3BA55C", "#8A8F98", "#D64545"

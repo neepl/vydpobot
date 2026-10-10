@@ -6,8 +6,8 @@ from zoneinfo import ZoneInfo
 import pytest
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 
-import deye_bot.bot as bot
-from deye_bot.flow import (
+import vydpo_bot.bot as bot
+from vydpo_bot.flow import (
     CORNERS,
     flow_direction,
     line_width,
@@ -16,8 +16,8 @@ from deye_bot.flow import (
     segment_midpoints,
     soc_color,
 )
-from deye_bot.i18n import Lang
-from deye_bot.models import BatteryState, Snapshot
+from vydpo_bot.i18n import Lang
+from vydpo_bot.models import BatteryState, Snapshot
 
 TZ = ZoneInfo("Europe/Kyiv")
 NOW = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
@@ -188,7 +188,7 @@ async def _allow(update, bot_data, *, admin: bool = False) -> bool:
 
 
 def _assert_text_clear(s: Snapshot, lang: Lang) -> None:
-    from deye_bot.flow import build_flow_figure
+    from vydpo_bot.flow import build_flow_figure
 
     fig, ax = build_flow_figure(s, lang=lang, tz=TZ, now=NOW)
     renderer = FigureCanvasAgg(fig).get_renderer()
@@ -223,7 +223,7 @@ def test_text_clears_lines(s: Snapshot, lang: Lang) -> None:
 
 
 def _footer_text(s: Snapshot, lang: Lang, checked_at) -> str:
-    from deye_bot.flow import build_flow_figure
+    from vydpo_bot.flow import build_flow_figure
 
     fig, ax = build_flow_figure(s, lang=lang, tz=TZ, now=NOW, checked_at=checked_at)
     renderer = FigureCanvasAgg(fig).get_renderer()
@@ -238,7 +238,7 @@ def _footer_text(s: Snapshot, lang: Lang, checked_at) -> str:
 @pytest.mark.parametrize("lang", ["en", "uk"])
 @pytest.mark.parametrize("age", [2, 180, 3000])
 def test_checked_footer_fits_and_png(lang: Lang, age: int) -> None:
-    from deye_bot.flow import render_flow
+    from vydpo_bot.flow import render_flow
 
     s = snap(60, 100, 300, 0, 0, age_min=age)
     checked = NOW

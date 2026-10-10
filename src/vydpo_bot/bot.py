@@ -14,20 +14,20 @@ from telegram.constants import ChatAction, ChatType, ParseMode
 from telegram.error import BadRequest, Forbidden
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from deye_bot.alerts import (
+from vydpo_bot.alerts import (
     AlertEvent,
     AlertState,
     evaluate_soc,
     evaluate_staleness,
 )
-from deye_bot.charts import render_chart, summarize
-from deye_bot.config import Settings
-from deye_bot.flow import render_flow
-from deye_bot.i18n import SUPPORTED, Lang, fmt_ago, fmt_num, fmt_power, t
-from deye_bot.models import BatteryState, HistoryPoint, Snapshot
-from deye_bot.solarman.portal import PortalAuthError
-from deye_bot.source import DataSource, make_source
-from deye_bot.storage import (
+from vydpo_bot.charts import render_chart, summarize
+from vydpo_bot.config import Settings
+from vydpo_bot.flow import render_flow
+from vydpo_bot.i18n import SUPPORTED, Lang, fmt_ago, fmt_num, fmt_power, t
+from vydpo_bot.models import BatteryState, HistoryPoint, Snapshot
+from vydpo_bot.solarman.portal import PortalAuthError
+from vydpo_bot.source import DataSource, make_source
+from vydpo_bot.storage import (
     KEY_ALERT_STATE,
     KEY_LANGUAGE,
     KEY_LIVE_MESSAGES,

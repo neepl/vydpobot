@@ -4,8 +4,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from deye_bot.charts import render_chart, summarize
-from deye_bot.models import HistoryPoint
+from vydpo_bot.charts import render_chart, summarize
+from vydpo_bot.models import HistoryPoint
 
 TZ = ZoneInfo("Europe/Kyiv")
 NOW = datetime(2026, 6, 1, 18, 0, tzinfo=UTC)

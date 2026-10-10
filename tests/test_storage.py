@@ -3,8 +3,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from deye_bot.models import BatteryState, Snapshot
-from deye_bot.storage import KEY_ALERT_STATE, Storage
+from vydpo_bot.models import BatteryState, Snapshot
+from vydpo_bot.storage import KEY_ALERT_STATE, Storage, migrate_legacy_db
 
 T0 = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
 
@@ -84,3 +84,52 @@ def test_persists_across_reopen(tmp_path):
     s2 = Storage(path)
     assert s2.latest_sample() is not None and s2.get_json("k") == [1, 2]
     s2.close()
+
+
+# ------------------------------------------------------------------ legacy DB migration
+
+
+def _legacy(tmp_path, *suffixes):
+    for suffix in ("", *suffixes):
+        (tmp_path / f"deye_bot.sqlite3{suffix}").write_bytes(b"x" + suffix.encode())
+
+
+def test_migrates_legacy_db_with_companions(tmp_path):
+    legacy = Storage(tmp_path / "deye_bot.sqlite3")
+    legacy.set_json("portal_refresh_token", "rotated")
+    legacy.close()
+    (tmp_path / "deye_bot.sqlite3.portal.lock").touch()
+    s = Storage(tmp_path / "vydpo_bot.sqlite3")
+    try:
+        assert s.get_json("portal_refresh_token") == "rotated"
+    finally:
+        s.close()
+    assert not (tmp_path / "deye_bot.sqlite3").exists()
+    assert (tmp_path / "vydpo_bot.sqlite3.portal.lock").exists()
+
+
+def test_existing_target_is_never_overwritten(tmp_path):
+    _legacy(tmp_path, "-wal")
+    target = tmp_path / "vydpo_bot.sqlite3"
+    target.write_bytes(b"current")
+    assert migrate_legacy_db(target) is False
+    assert target.read_bytes() == b"current"
+    assert (tmp_path / "deye_bot.sqlite3").exists()
+
+
+def test_no_legacy_file(tmp_path):
+    assert migrate_legacy_db(tmp_path / "vydpo_bot.sqlite3") is False
+
+
+def test_target_is_the_legacy_name(tmp_path):
+    _legacy(tmp_path)
+    assert migrate_legacy_db(tmp_path / "deye_bot.sqlite3") is False
+    assert (tmp_path / "deye_bot.sqlite3").exists()
+
+
+def test_wal_and_shm_move_together(tmp_path):
+    _legacy(tmp_path, "-wal", "-shm")
+    target = tmp_path / "vydpo_bot.sqlite3"
+    assert migrate_legacy_db(target) is True
+    assert (tmp_path / "vydpo_bot.sqlite3-wal").read_bytes() == b"x-wal"
+    assert (tmp_path / "vydpo_bot.sqlite3-shm").read_bytes() == b"x-shm"

@@ -24,9 +24,9 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from deye_bot.config import Settings
-from deye_bot.models import HistoryPoint, Snapshot
-from deye_bot.solarman.client import (
+from vydpo_bot.config import Settings
+from vydpo_bot.models import HistoryPoint, Snapshot
+from vydpo_bot.solarman.client import (
     ATTEMPTS,
     BACKOFF_S,
     TIMEOUT_S,
@@ -38,7 +38,7 @@ from deye_bot.solarman.client import (
     snapshot_from_station,
     with_estimated_battery,
 )
-from deye_bot.storage import (
+from vydpo_bot.storage import (
     KEY_PORTAL_ACCESS,
     KEY_PORTAL_BOOTSTRAP_SHA,
     KEY_PORTAL_REFRESH_TOKEN,
@@ -549,7 +549,7 @@ class PortalClient:
     # ---- probe
 
     async def probe(self, station_id: int | None = None, today: date | None = None) -> str:
-        """Read-only exploration for `deye-bot portal-probe`; returns scrubbed pretty JSON."""
+        """Read-only exploration for `vydpo-bot portal-probe`; returns scrubbed pretty JSON."""
         today = today or datetime.now(self._tz).date()
         out: dict[str, Any] = {"date": today.isoformat()}
         out["token_renewal"] = await self._attempt(self._renewal_info())

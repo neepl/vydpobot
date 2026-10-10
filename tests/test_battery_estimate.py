@@ -5,11 +5,11 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from deye_bot.bot import format_live_summary, format_status
-from deye_bot.flow import _node_texts, render_flow
-from deye_bot.models import BatteryState, Snapshot
-from deye_bot.solarman.client import snapshot_from_station, with_estimated_battery
-from deye_bot.solarman.portal import alias_station
+from vydpo_bot.bot import format_live_summary, format_status
+from vydpo_bot.flow import _node_texts, render_flow
+from vydpo_bot.models import BatteryState, Snapshot
+from vydpo_bot.solarman.client import snapshot_from_station, with_estimated_battery
+from vydpo_bot.solarman.portal import alias_station
 
 TZ = ZoneInfo("Europe/Kyiv")
 FIXTURE = Path(__file__).parent / "fixtures" / "portal_station_real.json"

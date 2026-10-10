@@ -7,9 +7,9 @@ from zoneinfo import ZoneInfo
 import pytest
 from telegram_fakes import real_bot_signatures
 
-from deye_bot import bot as bot_mod
-from deye_bot.alerts import AlertEvent
-from deye_bot.bot import (
+from vydpo_bot import bot as bot_mod
+from vydpo_bot.alerts import AlertEvent
+from vydpo_bot.bot import (
     format_event,
     format_status,
     get_threshold,
@@ -18,9 +18,9 @@ from deye_bot.bot import (
     poll_once,
     soc_bar,
 )
-from deye_bot.models import BatteryState, Snapshot
-from deye_bot.solarman.portal import PortalAuthError
-from deye_bot.storage import KEY_PORTAL_AUTH_NOTIFIED, KEY_THRESHOLD, Storage
+from vydpo_bot.models import BatteryState, Snapshot
+from vydpo_bot.solarman.portal import PortalAuthError
+from vydpo_bot.storage import KEY_PORTAL_AUTH_NOTIFIED, KEY_THRESHOLD, Storage
 
 TZ = ZoneInfo("Europe/Kyiv")
 NOW = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)

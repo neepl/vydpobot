@@ -1,11 +1,11 @@
-# deye-bot — implementation spec (source of truth for all modules)
+# vydpo-bot — implementation spec (source of truth for all modules)
 
 Telegram bot monitoring a **Deye three-phase LV hybrid (SUN-xK-SG04LP3)** via the
 **Solarman Cloud OpenAPI**, deployed on a VPS in Docker. Python 3.12, uv, async.
 
 Already written (do not change signatures without reason): `pyproject.toml`,
-`src/deye_bot/models.py` (Snapshot, HistoryPoint, BatteryState + sign conventions),
-`src/deye_bot/config.py` (Settings).
+`src/vydpo_bot/models.py` (Snapshot, HistoryPoint, BatteryState + sign conventions),
+`src/vydpo_bot/config.py` (Settings).
 
 Dev env: project-local `.venv` managed by uv. Always run commands as
 `env -u VIRTUAL_ENV uv run ...` (an unrelated outer venv is active in the shell).
@@ -15,7 +15,7 @@ Quality gate: `uv run ruff check src tests && uv run ruff format --check src tes
 ## Module map
 
 ```
-src/deye_bot/
+src/vydpo_bot/
   models.py            (done)
   config.py            (done)
   i18n.py              Agent B
@@ -97,7 +97,7 @@ still return it (bot shows "n/a").
 ## __main__.py (Agent A)
 
 argparse subcommands, `asyncio.run` where needed, settings via `get_settings()`:
-- `run` -> `from deye_bot.bot import run; run(settings)` (lazy import; bot.py written by Agent C)
+- `run` -> `from vydpo_bot.bot import run; run(settings)` (lazy import; bot.py written by Agent C)
 - `discover` -> print stations (id, name, location, capacity) and each station's devices
   (deviceSn, deviceType, deviceId) as a readable table. Should only need Solarman settings —
   but Settings requires Telegram fields too; that's acceptable (document dummy values).
@@ -259,8 +259,8 @@ Global error handler logs exceptions. Use `parse_mode=HTML` and escape dynamic t
 - `Dockerfile`: multi-stage with `ghcr.io/astral-sh/uv:python3.12-bookworm-slim` builder
   (`uv sync --frozen --no-dev --no-editable`), runtime `python:3.12-slim-bookworm`, copy
   `/app/.venv`, non-root user, `TZ` support (tzdata is in python image? ensure `tzdata` pip pkg
-  or apt), `VOLUME /app/data`, `CMD ["deye-bot", "run"]`. MPLCONFIGDIR=/tmp/matplotlib.
-- `compose.yaml`: service `deye-bot`, `env_file: .env`, `restart: unless-stopped`, volume
+  or apt), `VOLUME /app/data`, `CMD ["vydpo-bot", "run"]`. MPLCONFIGDIR=/tmp/matplotlib.
+- `compose.yaml`: service `vydpo-bot`, `env_file: .env`, `restart: unless-stopped`, volume
   `./data:/app/data`, log rotation.
 - `.env.example` with every Settings field documented.
 - `README.md`: overview, **Solarman API access guide** (section text will be supplied by the
@@ -336,7 +336,7 @@ Reference implementation studied: github.com/Aksolotl123/ha-solarman-cloud (2026
   `portal_bootstrap_sha`) → then the env value is used and stored.
 
 ### Common source interface
-`deye_bot/source.py`: `class DataSource(Protocol)` with `resolve_station_id`, `get_snapshot`,
+`vydpo_bot/source.py`: `class DataSource(Protocol)` with `resolve_station_id`, `get_snapshot`,
 `get_history`, `list_stations`, `list_devices`, `raw_debug(station_id) -> dict`, `aclose`, and
 `make_source(settings, storage) -> DataSource`. Both `SolarmanClient` and `PortalClient` implement it.
 bot.py and `__main__.py` use only `make_source`/`DataSource`.
@@ -352,7 +352,7 @@ bot.py and `__main__.py` use only `make_source`/`DataSource`.
 
 ### CLI
 - `discover`, `dump` work for both backends via `DataSource`.
-- `deye-bot portal-probe [--out FILE]`: renew token, list stations, device list, station detail, fast/system, try
+- `vydpo-bot portal-probe [--out FILE]`: renew token, list stations, device list, station detail, fast/system, try
   history candidates; write scrubbed JSON (tokens removed) to stdout/FILE for the user to share.
 
 ### Quota note (OpenAPI)

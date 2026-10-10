@@ -3,11 +3,11 @@
 from datetime import datetime
 from typing import Protocol
 
-from deye_bot.config import Settings
-from deye_bot.models import HistoryPoint, Snapshot
-from deye_bot.solarman.client import SolarmanClient
-from deye_bot.solarman.portal import PortalClient
-from deye_bot.storage import Storage
+from vydpo_bot.config import Settings
+from vydpo_bot.models import HistoryPoint, Snapshot
+from vydpo_bot.solarman.client import SolarmanClient
+from vydpo_bot.solarman.portal import PortalClient
+from vydpo_bot.storage import Storage
 
 
 class DataSource(Protocol):

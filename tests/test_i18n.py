@@ -3,7 +3,7 @@ import string
 
 import pytest
 
-from deye_bot.i18n import MESSAGES, SUPPORTED, fmt_ago, fmt_num, fmt_power, t
+from vydpo_bot.i18n import MESSAGES, SUPPORTED, fmt_ago, fmt_num, fmt_power, t
 
 REQUIRED = [
     "status.title", "status.updated", "status.pv", "status.load", "status.grid_import",
