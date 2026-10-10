@@ -1,8 +1,8 @@
 services:
-  deye-bot:
+  vydpo-bot:
     build: .
-    image: deye-bot:latest
-    container_name: deye-bot
+    image: vydpo-bot:latest
+    container_name: vydpo-bot
     env_file: .env
     environment:
       DB_PATH: /app/data/deye_bot.sqlite3

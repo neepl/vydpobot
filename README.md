@@ -1,6 +1,7 @@
-# deye-bot
+# vydpo_bot
 
-Telegram bot that monitors a Deye hybrid inverter (tested design target: three-phase LV
+[@vydpo_bot](https://t.me/vydpo_bot) — Telegram bot for building vital stats. First module:
+monitors a Deye hybrid inverter (tested design target: three-phase LV
 SUN-xK-SG04LP3) through the Solarman Cloud OpenAPI. It runs in Docker on a small VPS.
 
 ## Features
@@ -89,7 +90,7 @@ List the plants and devices visible to the account:
 
 ```bash
 uv run deye-bot discover                      # local dev
-docker compose run --rm deye-bot deye-bot discover   # on the server
+docker compose run --rm vydpo-bot deye-bot discover  # on the server
 ```
 
 Copy the station `id` into `SOLARMAN_STATION_ID`. Copy the `deviceSn` of the device with type
@@ -133,13 +134,15 @@ battery power comes back empty, compare those keys with `DEVICE_KEYS` in
 
 ## Telegram setup
 
-1. Open [@BotFather](https://t.me/BotFather), send `/newbot`, follow the prompts and copy the
-   token into `TELEGRAM_TOKEN`.
+1. Open [@BotFather](https://t.me/BotFather), send `/newbot` and use the username `vydpo_bot`
+   (or `/mybots` -> `@vydpo_bot` -> *API Token* if it already exists). Copy the token into
+   `TELEGRAM_TOKEN`. The token alone identifies the bot; the username is not configured
+   anywhere in the code.
 2. Open a chat with your new bot and press Start (a bot cannot message you first).
    To receive alerts in a group or channel, add the bot to it first; in a channel the bot
    must be an administrator (with permission to post messages).
 3. Optional: in BotFather, `/setprivacy` -> Disable if you want the bot to see all messages in
-   a group. Commands (`/status@yourbot`) work in groups even with privacy mode enabled, so this
+   a group. Commands (`/status@vydpo_bot`) work in groups even with privacy mode enabled, so this
    is usually not needed.
 
 ### Chat and user IDs
@@ -186,7 +189,7 @@ git clone <this repo> && cd tgbots
 cp .env.example .env && $EDITOR .env
 mkdir -p data && sudo chown 10001:10001 data   # the container runs as non-root uid 10001
 docker compose up -d --build
-docker compose logs -f deye-bot
+docker compose logs -f vydpo-bot
 ```
 
 The SQLite database lives in `./data` (mounted at `/app/data`), so it survives rebuilds.
