@@ -1,12 +1,16 @@
 # vydpobot
 
-[@vydpo_bot](https://t.me/vydpo_bot) — Telegram bot for building vital stats. First module:
+Telegram bot for building vital stats. First module:
 monitors a Deye hybrid inverter (tested design target: three-phase LV
 SUN-xK-SG04LP3) through the Solarman Cloud OpenAPI. It runs in Docker on a small VPS.
 
 <p>
   <img src="docs/img/status_flow.png" width="48%" alt="/status power flow">
-  <img src="docs/img/graph_uk.png" width="48%" alt="/graph 24h chart (Ukrainian)">
+  <img src="docs/img/outage_flow.png" width="48%" alt="/status during a grid outage">
+</p>
+<p>
+  <img src="docs/img/graph_24h.png" width="48%" alt="/graph 24h chart">
+  <img src="docs/img/month.png" width="48%" alt="/month daily statistics">
 </p>
 
 ## Features
@@ -283,22 +287,22 @@ The free OpenAPI tier for Smart accounts allows at most 3 plants and 200 000 cal
 
 ## Telegram setup
 
-1. Open [@BotFather](https://t.me/BotFather), send `/newbot` and use the username `vydpo_bot`
-   (or `/mybots` -> `@vydpo_bot` -> *API Token* if it already exists). Copy the token into
+1. Open [@BotFather](https://t.me/BotFather), send `/newbot` and pick a name and username
+   (or `/mybots` -> your bot -> *API Token* if it already exists). Copy the token into
    `TELEGRAM_TOKEN`. The token alone identifies the bot; the username is not configured
    anywhere in the code.
 2. Open a chat with your new bot and press Start (a bot cannot message you first).
    To receive alerts in a group or channel, add the bot to it first; in a channel the bot
    must be an administrator (with permission to post messages).
 3. Optional: in BotFather, `/setprivacy` -> Disable if you want the bot to see all messages in
-   a group. Commands (`/status@vydpo_bot`) work in groups even with privacy mode enabled, so this
+   a group. Commands (`/status@your_bot`) work in groups even with privacy mode enabled, so this
    is usually not needed.
 
 ### Chat and user IDs
 
 - Your user ID: message [@userinfobot](https://t.me/userinfobot). For a private alert chat,
   `ALERT_CHAT_ID` is your user ID.
-- Group ID (easiest): start the bot, add it to the group and send `/status@vydpo_bot` there.
+- Group ID (easiest): start the bot, add it to the group and send `/status@your_bot` there.
   The bot ignores the unknown chat and logs
   `Ignored command from chat_id=-100… (supergroup 'Your group')`. Put that number in
   `ALERT_CHAT_ID` and restart. Group IDs are negative; supergroups look like `-100…`.
@@ -481,7 +485,7 @@ a caption. The bot edits it on every poll, so it never needs a new `/status`.
   status (see "Building equipment" below).
 
 **Permission.** To pin, the bot needs one right in the group: Edit -> Administrators -> Add
-Admin -> @vydpo_bot, and enable ONLY "Pin Messages". Without it the bot still keeps the message
+Admin -> your bot, and enable ONLY "Pin Messages". Without it the bot still keeps the message
 updated, just not pinned (it tells you so).
 
 **Notifications.** Edits are silent. Alerts stay separate notifying messages.
