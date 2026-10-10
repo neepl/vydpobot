@@ -13,6 +13,7 @@ _HELP_EN = (
     "/lang [en|uk] - show or set the interface language\n"
     "/live - pin a live status message that updates on every poll (admin)\n"
     "/live off - stop and remove the live message (admin)\n"
+    "/health - state of the building equipment (healthchecks.io)\n"
     "/help - this message"
 )
 _HELP_UK = (
@@ -24,6 +25,7 @@ _HELP_UK = (
     "/live - закріпити повідомлення зі станом, що оновлюється під час кожного опитування "
     "(адмін)\n"
     "/live off - зупинити й видалити живе повідомлення (адмін)\n"
+    "/health - стан обладнання будинку (healthchecks.io)\n"
     "/help - ця довідка"
 )
 
@@ -128,6 +130,27 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "time.ago.h.one": "{n} hour ago",
         "time.ago.h.few": "{n} hours ago",
         "time.just_now": "just now",
+        "equip.down": "{name} is down (last signal {time})",
+        "equip.recovered": "{name} is back up (was down {duration})",
+        "equip.api_failed": "Cannot reach healthchecks.io ({reason})",
+        "health.title": "Building equipment",
+        "health.checked": "checked {time}",
+        "health.disabled": (
+            "Equipment monitoring is off. To enable it, set HEALTHCHECKS_API_KEY (a read-only "
+            "healthchecks.io API key) and HEALTHCHECKS_CHECKS (comma-separated check names or "
+            "slugs) in .env and restart the bot."
+        ),
+        "live.equipment": "{ok}/{total} OK",
+        "time.dur.min": "{n} minutes",
+        "time.dur.min.one": "{n} minute",
+        "time.dur.min.few": "{n} minutes",
+        "time.dur.h": "{n} hours",
+        "time.dur.h.one": "{n} hour",
+        "time.dur.h.few": "{n} hours",
+        "time.dur.d": "{n} days",
+        "time.dur.d.one": "{n} day",
+        "time.dur.d.few": "{n} days",
+        "time.dur.short": "less than a minute",
     },
     "uk": {
         "status.title": "Стан інвертора",
@@ -233,6 +256,27 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "time.ago.h.one": "{n} годину тому",
         "time.ago.h.few": "{n} години тому",
         "time.just_now": "щойно",
+        "equip.down": "{name}: немає сигналу (останній {time})",
+        "equip.recovered": "{name} знову в нормі (не працювало {duration})",
+        "equip.api_failed": "Не вдається отримати дані з healthchecks.io ({reason})",
+        "health.title": "Обладнання будинку",
+        "health.checked": "перевірено {time}",
+        "health.disabled": (
+            "Моніторинг обладнання вимкнено. Щоб увімкнути, вкажіть у .env HEALTHCHECKS_API_KEY "
+            "(ключ API healthchecks.io лише для читання) і HEALTHCHECKS_CHECKS (назви або slug "
+            "перевірок через кому) та перезапустіть бота."
+        ),
+        "live.equipment": "{ok}/{total} в нормі",
+        "time.dur.min": "{n} хвилин",
+        "time.dur.min.one": "{n} хвилину",
+        "time.dur.min.few": "{n} хвилини",
+        "time.dur.h": "{n} годин",
+        "time.dur.h.one": "{n} годину",
+        "time.dur.h.few": "{n} години",
+        "time.dur.d": "{n} днів",
+        "time.dur.d.one": "{n} день",
+        "time.dur.d.few": "{n} дні",
+        "time.dur.short": "менше хвилини",
     },
 }
 
@@ -280,4 +324,18 @@ def fmt_ago(lang: Lang, seconds: float) -> str:
     if minutes < 1:
         return t(lang, "time.just_now")
     base, n = ("time.ago.min", minutes) if minutes < 60 else ("time.ago.h", minutes // 60)
+    return t(lang, _ago_key(base, _plural_form(lang, n)), n=n)
+
+
+def fmt_duration(lang: Lang, seconds: float) -> str:
+    """'less than a minute', '5 minutes', '3 hours', '2 days' (correct Ukrainian plurals)."""
+    minutes = int(max(seconds, 0) // 60)
+    if minutes < 1:
+        return t(lang, "time.dur.short")
+    if minutes < 60:
+        base, n = "time.dur.min", minutes
+    elif minutes < 24 * 60:
+        base, n = "time.dur.h", minutes // 60
+    else:
+        base, n = "time.dur.d", minutes // (24 * 60)
     return t(lang, _ago_key(base, _plural_form(lang, n)), n=n)

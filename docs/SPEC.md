@@ -359,3 +359,27 @@ bot.py and `__main__.py` use only `make_source`/`DataSource`.
 Free tier for Smart accounts: ≤3 plants, ≤200 000 calls/year (~548/day). Default 5-min realtime
 poll = 288/day; enabling `SOLARMAN_DEVICE_SN` doubles it to ~576/day → over quota. Log a startup
 warning if `device_sn` is set and `poll_interval_s < 600`; document in README.
+
+## Building equipment (healthchecks.io) — `equipment.py`
+
+Optional. Enabled only when `HEALTHCHECKS_API_KEY` and a non-empty `HEALTHCHECKS_CHECKS` are both
+set (one without the other: WARNING at startup, disabled; never a validation error). Other
+settings: `HEALTHCHECKS_POLL_S` (default 300, min 60), `HEALTHCHECKS_API_URL` (default
+`https://healthchecks.io`, trailing slash stripped).
+
+- Poll: one `GET {api_url}/api/v3/checks/` with `X-Api-Key`, own `httpx.AsyncClient` (10 s
+  timeout, 2 attempts with backoff on network errors/5xx, no retry on 401/403). The key is never
+  logged. Entries match case-insensitively by slug, name, unique_key or uuid; result is in env
+  order, unmatched entries are logged once per change (WARNING), never alerted.
+- `diff(prev_state, checks, now)` is pure. State per check (unique_key, else uuid/slug) is
+  `{"status", "down_since", "alerted"}` in `KEY_EQUIPMENT_STATE`. Alerts on transitions only:
+  to `down` while not alerted -> `down`; to `up` while alerted -> `recovered` (with duration).
+  grace/started/paused/new never alert; state survives restarts.
+- 3 consecutive API failures send one admin notice (admins' private chats, else alert chat);
+  cleared silently on the next success.
+- Bot: separate repeating job (`first` = 15 s), cache of the last `FetchResult` in
+  `bot_data["equipment_cache"]`. `/health` (read-only access) lists entries in env order with
+  status emoji, name and last ping; pinned live caption gets `🩺 ok/total OK · 🔴 names` before
+  the "Data" line (names truncated to keep the caption under 1024 characters); live message is
+  refreshed after an equipment job that produced events.
+

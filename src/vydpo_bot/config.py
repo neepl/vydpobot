@@ -7,6 +7,7 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 IntList = Annotated[list[int], NoDecode]
+StrList = Annotated[list[str], NoDecode]
 
 
 def _plain(v: str | SecretStr) -> str:
@@ -57,6 +58,13 @@ class Settings(BaseSettings):
     # Warn when the logger hasn't reported for this long (0 disables).
     stale_after_min: int = Field(default=30, ge=0)
 
+    # --- Building equipment (healthchecks.io Management API; a read-only key is enough) ---
+    healthchecks_api_key: SecretStr | None = None
+    # Comma-separated; each item matches a check by slug, name, unique_key or uuid (any case).
+    healthchecks_checks: StrList = Field(default_factory=list)
+    healthchecks_poll_s: int = Field(default=300, ge=60)
+    healthchecks_api_url: str = "https://healthchecks.io"  # self-hosted instances
+
     # Default UI language; admins can override at runtime with /lang (persisted in DB).
     language: Literal["en", "uk"] = "en"
     timezone: str = "Europe/Kyiv"
@@ -68,6 +76,18 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [int(x) for x in v.replace(" ", "").split(",") if x]
         return v
+
+    @field_validator("healthchecks_checks", mode="before")
+    @classmethod
+    def _split_names(cls, v: object) -> object:
+        if isinstance(v, str):
+            return [x.strip() for x in v.split(",") if x.strip()]
+        return v
+
+    @field_validator("healthchecks_api_url")
+    @classmethod
+    def _strip_slash(cls, v: str) -> str:
+        return v.strip().rstrip("/")
 
     @model_validator(mode="after")
     def _check_backend(self) -> "Settings":
@@ -86,6 +106,11 @@ class Settings(BaseSettings):
                 f"SOLARMAN_BACKEND={self.solarman_backend} requires: {', '.join(missing)}"
             )
         return self
+
+    @property
+    def healthchecks_enabled(self) -> bool:
+        key = self.healthchecks_api_key
+        return bool(key is not None and _plain(key) and self.healthchecks_checks)
 
     @property
     def tz(self) -> ZoneInfo:

@@ -22,13 +22,22 @@ from vydpo_bot.alerts import (
 )
 from vydpo_bot.charts import render_chart, summarize
 from vydpo_bot.config import Settings
+from vydpo_bot.equipment import (
+    EquipEvent,
+    EquipmentError,
+    EquipmentMonitor,
+    FetchResult,
+    diff,
+    health_counts,
+)
 from vydpo_bot.flow import render_flow
-from vydpo_bot.i18n import SUPPORTED, Lang, fmt_ago, fmt_num, fmt_power, t
+from vydpo_bot.i18n import SUPPORTED, Lang, fmt_ago, fmt_duration, fmt_num, fmt_power, t
 from vydpo_bot.models import BatteryState, HistoryPoint, Snapshot
 from vydpo_bot.solarman.portal import PortalAuthError
 from vydpo_bot.source import DataSource, make_source
 from vydpo_bot.storage import (
     KEY_ALERT_STATE,
+    KEY_EQUIPMENT_STATE,
     KEY_LANGUAGE,
     KEY_LIVE_MESSAGES,
     KEY_PORTAL_AUTH_NOTIFIED,
@@ -39,12 +48,24 @@ from vydpo_bot.storage import (
 log = logging.getLogger(__name__)
 
 FAILURES_BEFORE_NOTICE = 3
+EQUIPMENT_FIRST_S = 15
+CAPTION_LIMIT = 1024
 RETENTION_DAYS = 14
 GRID_IDLE_W = 50.0
 BAR_CELLS = 10
 QUOTA_MIN_POLL_S = 600  # OpenAPI free tier: ~548 calls/day; realtime + device SN doubles usage
 DEFAULT_GRAPH_HOURS = 24
 MAX_GRAPH_HOURS = 48
+
+EQUIP_EMOJI = {
+    "up": "🟢",
+    "grace": "🟡",
+    "down": "🔴",
+    "paused": "⏸",
+    "new": "🆕",
+    "started": "▶️",
+}
+NOT_FOUND_EMOJI = "❓"
 
 STATE_EMOJI = {
     BatteryState.CHARGING: "⚡",
@@ -53,7 +74,7 @@ STATE_EMOJI = {
     BatteryState.UNKNOWN: "❔",
 }
 
-COMMANDS = ("start", "help", "status", "graph", "threshold", "lang", "live")
+COMMANDS = ("start", "help", "status", "graph", "threshold", "lang", "live", "health")
 
 
 # --------------------------------------------------------------------------- pure helpers
@@ -199,6 +220,7 @@ def format_live_caption(
     now: datetime,
     threshold: float | None = None,
     stale_after_min: int = 30,
+    equipment: FetchResult | None = None,
 ) -> str:
     """HTML caption of the pinned live-status photo: summary, details, update time."""
     s = snapshot
@@ -208,10 +230,36 @@ def format_live_caption(
     lines = [format_live_summary(s, lang, tz, now, stale), ""]
     lines += _status_lines(s, lang, threshold)
     check = now.astimezone(tz).strftime("%H:%M")
-    lines += ["", html.escape(t(lang, "live.updated", data_time=when, check_time=check))]
+    tail = ["", html.escape(t(lang, "live.updated", data_time=when, check_time=check))]
     if stale:
-        lines.append(html.escape(t(lang, "live.stale", time=_local(s.ts, tz, now))))
-    return "\n".join(lines)
+        tail.append(html.escape(t(lang, "live.stale", time=_local(s.ts, tz, now))))
+    if equipment is not None:
+        base = len("\n".join(lines + tail)) + 1  # +1: newline before the equipment line
+        if line := equipment_line(equipment, lang, CAPTION_LIMIT - 1 - base):
+            tail.insert(1, line)  # just before the "Data: ..." line
+    return "\n".join(lines + tail)
+
+
+def equipment_line(result: FetchResult, lang: Lang, budget: int) -> str | None:
+    """'🩺 3/4 OK · 🔴 lift', names truncated with '…' to fit `budget` characters."""
+    ok, total, down = health_counts(result)
+    if total == 0:
+        return None
+    head = f"🩺 {html.escape(t(lang, 'live.equipment', ok=ok, total=total))}"
+    if not down:
+        return head
+    names = ", ".join(down)
+    prefix = " · 🔴 "
+
+    def render(n: int) -> str:
+        shown = names if n >= len(names) else names[: max(n, 0)].rstrip() + "…"
+        return head + prefix + html.escape(shown)
+
+    n = len(names)
+    while n > 0 and len(render(n)) > budget:
+        n -= 1
+    line = render(n)
+    return line if len(line) <= budget else head
 
 
 def format_event(event: AlertEvent, lang: Lang, snapshot: Snapshot | None = None) -> str:
@@ -232,6 +280,31 @@ def format_event(event: AlertEvent, lang: Lang, snapshot: Snapshot | None = None
             return f"⚠️ {html.escape(text)}"
         case _:
             return f"🟢 {html.escape(t(lang, 'alert.back_online'))}"
+
+
+def format_equipment_event(event: EquipEvent, lang: Lang, tz: ZoneInfo, now: datetime) -> str:
+    """HTML text for one equipment event (check names are escaped)."""
+    name = event.name
+    if event.kind == "down":
+        when = _local(event.last_ping, tz, now) if event.last_ping else DASH
+        return f"🔴 {html.escape(t(lang, 'equip.down', name=name, time=when))}"
+    dur = fmt_duration(lang, event.duration.total_seconds()) if event.duration else DASH
+    return f"🟢 {html.escape(t(lang, 'equip.recovered', name=name, duration=dur))}"
+
+
+def format_health(result: FetchResult, fetched_at: datetime, lang: Lang, tz: ZoneInfo) -> str:
+    """HTML body of /health: one line per configured entry, then the 'checked' footer."""
+    now = datetime.now(UTC)
+    lines = [f"<b>{html.escape(t(lang, 'health.title'))}</b>", ""]
+    for entry, c in result.items:
+        if c is None:
+            lines.append(f"{NOT_FOUND_EMOJI} {html.escape(entry)} · {DASH}")
+            continue
+        when = _local(c.last_ping, tz, now) if c.last_ping else DASH
+        lines.append(f"{EQUIP_EMOJI.get(c.status, NOT_FOUND_EMOJI)} {html.escape(c.name)} · {when}")
+    checked = fetched_at.astimezone(tz).strftime("%H:%M")
+    lines += ["", html.escape(t(lang, "health.checked", time=checked))]
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- runtime values
@@ -354,6 +427,69 @@ async def poll_once(bot_data: dict[str, Any], now: datetime) -> PollResult:
     return result
 
 
+def equipment_config_warning(settings: Settings) -> str | None:
+    """Startup warning when only one of HEALTHCHECKS_API_KEY / HEALTHCHECKS_CHECKS is set."""
+    key = getattr(settings, "healthchecks_api_key", None)
+    has_key = key is not None and bool(key.get_secret_value())
+    has_checks = bool(getattr(settings, "healthchecks_checks", None))
+    if has_key and not has_checks:
+        return "HEALTHCHECKS_API_KEY is set but HEALTHCHECKS_CHECKS is empty: monitoring disabled."
+    if has_checks and not has_key:
+        return "HEALTHCHECKS_CHECKS is set but HEALTHCHECKS_API_KEY is empty: monitoring disabled."
+    return None
+
+
+@dataclass
+class EquipmentResult:
+    alerts: list[str] = field(default_factory=list)  # -> alert chat
+    admin_notices: list[str] = field(default_factory=list)  # -> admins' private chats
+    changed: bool = False  # events were produced
+
+
+def _note_unmatched(bd: dict[str, Any], result: FetchResult) -> None:
+    missing = frozenset(result.unmatched)
+    if missing != bd.get("equipment_unmatched", frozenset()) and missing:
+        log.warning(
+            "healthchecks.io: no check matches %s (use slug, name, unique_key or uuid)",
+            ", ".join(sorted(missing)),
+        )
+    bd["equipment_unmatched"] = missing
+
+
+async def equipment_once(bd: dict[str, Any], now: datetime) -> EquipmentResult:
+    """One equipment poll: fetch, diff, persist, cache. Never raises."""
+    out = EquipmentResult()
+    monitor: EquipmentMonitor | None = bd.get("equipment")
+    if monitor is None:
+        return out
+    settings: Settings = bd["settings"]
+    storage: Storage = bd["storage"]
+    lang = get_lang(bd)
+    try:
+        result = await monitor.fetch()
+    except Exception as e:
+        reason = str(e) if isinstance(e, EquipmentError) else type(e).__name__
+        log.warning("healthchecks.io poll failed: %s", reason)
+        fails = bd["equipment_fail_count"] = bd.get("equipment_fail_count", 0) + 1
+        if fails == FAILURES_BEFORE_NOTICE and not bd.get("equipment_notified"):
+            bd["equipment_notified"] = True
+            out.admin_notices = [html.escape(t(lang, "equip.api_failed", reason=reason))]
+        return out
+    bd["equipment_fail_count"] = 0
+    bd["equipment_notified"] = False
+    bd["equipment_cache"] = (result, now)
+    try:
+        _note_unmatched(bd, result)
+        state, events = diff(storage.get_json(KEY_EQUIPMENT_STATE), result.checks, now)
+        storage.set_json(KEY_EQUIPMENT_STATE, state)
+    except Exception:
+        log.exception("Equipment evaluation failed")
+        return out
+    out.alerts = [format_equipment_event(e, lang, settings.tz, now) for e in events]
+    out.changed = bool(events)
+    return out
+
+
 # --------------------------------------------------------------------------- live status
 
 
@@ -386,6 +522,20 @@ def _gone(e: BadRequest) -> bool:
     return any(m in text for m in ("not found", "message_id_invalid", "can't be edited"))
 
 
+def _live_caption(bd: dict[str, Any], snap: Snapshot, lang: Lang, now: datetime) -> str:
+    settings: Settings = bd["settings"]
+    cache = bd.get("equipment_cache") if bd.get("equipment") is not None else None
+    return format_live_caption(
+        snap,
+        lang,
+        settings.tz,
+        now,
+        get_threshold(bd),
+        settings.stale_after_min,
+        equipment=cache[0] if cache else None,
+    )
+
+
 async def refresh_live(
     bot: Any, bd: dict[str, Any], snap: Snapshot | None, only_chat: int | None = None
 ) -> None:
@@ -402,9 +552,7 @@ async def refresh_live(
             return
         settings: Settings = bd["settings"]
         lang, now = get_lang(bd), datetime.now(UTC)
-        caption = format_live_caption(
-            snap, lang, settings.tz, now, get_threshold(bd), settings.stale_after_min
-        )
+        caption = _live_caption(bd, snap, lang, now)
         png = await asyncio.to_thread(
             render_flow,
             snap,
@@ -490,6 +638,28 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     bd = context.application.bot_data
     if await _guard(update, bd):
         await _reply(update, t(get_lang(bd), "bot.help"))  # trusted HTML
+
+
+async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    bd = context.application.bot_data
+    if not await _guard(update, bd):
+        return
+    lang, settings = get_lang(bd), bd["settings"]
+    monitor: EquipmentMonitor | None = bd.get("equipment")
+    if monitor is None:
+        await _reply(update, html.escape(t(lang, "health.disabled")))
+        return
+    cache = bd.get("equipment_cache")
+    if cache is None:
+        try:
+            cache = (await monitor.fetch(), datetime.now(UTC))
+        except Exception as e:
+            reason = str(e) if isinstance(e, EquipmentError) else type(e).__name__
+            log.warning("/health fetch failed: %s", reason)
+            await _reply(update, html.escape(t(lang, "equip.api_failed", reason=reason)))
+            return
+        bd["equipment_cache"] = cache
+    await _reply(update, format_health(cache[0], cache[1], lang, settings.tz))
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -675,9 +845,7 @@ async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             now = datetime.now(UTC)
             try:
-                caption = format_live_caption(
-                    snap, lang, settings.tz, now, get_threshold(bd), settings.stale_after_min
-                )
+                caption = _live_caption(bd, snap, lang, now)
                 png = await asyncio.to_thread(
                     render_flow,
                     snap,
@@ -768,6 +936,24 @@ async def poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.exception("Live refresh failed")
 
 
+async def equipment_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    bd = context.application.bot_data
+    try:
+        result = await equipment_once(bd, datetime.now(UTC))
+        settings: Settings = bd["settings"]
+        for msg in result.alerts:
+            await context.bot.send_message(
+                chat_id=settings.alert_chat_id, text=msg, parse_mode=ParseMode.HTML
+            )
+        for chat_id in admin_targets(settings) if result.admin_notices else ():
+            for msg in result.admin_notices:
+                await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.HTML)
+        if result.changed:
+            await refresh_live(context.bot, bd, bd["storage"].latest_sample())
+    except Exception:
+        log.exception("Equipment job failed")
+
+
 async def _startup_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
     """One-off refresh of the live message(s) shortly after a restart."""
     bd = context.application.bot_data
@@ -800,6 +986,7 @@ def _commands(lang: Lang) -> list[BotCommand]:
             "threshold": "View or set the SOC alert threshold",
             "lang": "View or set the language",
             "live": "Pinned live status (admin): /live, /live off",
+            "health": "State of the building equipment",
         },
         "uk": {
             "start": "Показати довідку",
@@ -809,6 +996,7 @@ def _commands(lang: Lang) -> list[BotCommand]:
             "threshold": "Переглянути або змінити поріг сповіщень",
             "lang": "Переглянути або змінити мову",
             "live": "Закріплений живий стан (адмін): /live, /live off",
+            "health": "Стан обладнання будинку",
         },
     }[lang]
     return [BotCommand(c, desc[c]) for c in COMMANDS]
@@ -820,10 +1008,27 @@ async def _post_init(app: Application) -> None:
     app.bot_data.update(source=make_source(settings, storage), storage=storage, fail_count=0)
     if warning := quota_warning(settings):
         log.warning(warning)
+    if warning := equipment_config_warning(settings):
+        log.warning(warning)
+    equipment = None
+    if getattr(settings, "healthchecks_enabled", False):
+        equipment = EquipmentMonitor(
+            settings.healthchecks_api_url,
+            settings.healthchecks_api_key.get_secret_value(),
+            settings.healthchecks_checks,
+        )
+    app.bot_data["equipment"] = equipment
     await app.bot.set_my_commands(_commands("en"))
     await app.bot.set_my_commands(_commands("uk"), language_code="uk")
     assert app.job_queue is not None
     app.job_queue.run_repeating(poll_job, interval=settings.poll_interval_s, first=10, name="poll")
+    if equipment is not None:
+        app.job_queue.run_repeating(
+            equipment_job,
+            interval=settings.healthchecks_poll_s,
+            first=EQUIPMENT_FIRST_S,
+            name="equipment",
+        )
     app.job_queue.run_once(_startup_refresh, when=3, name="live_startup")
     app.job_queue.run_repeating(prune_job, interval=timedelta(days=1), first=60, name="prune")
 
@@ -831,6 +1036,8 @@ async def _post_init(app: Application) -> None:
 async def _post_shutdown(app: Application) -> None:
     if source := app.bot_data.get("source"):
         await source.aclose()
+    if equipment := app.bot_data.get("equipment"):
+        await equipment.aclose()
     if storage := app.bot_data.get("storage"):
         storage.close()
 
@@ -852,6 +1059,7 @@ def run(settings: Settings) -> None:
         ("threshold", cmd_threshold),
         ("lang", cmd_lang),
         ("live", cmd_live),
+        ("health", cmd_health),
         ("token", cmd_token),  # hidden: not in COMMANDS / set_my_commands
     ):
         app.add_handler(CommandHandler(name, fn))

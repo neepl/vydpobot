@@ -359,6 +359,7 @@ docker compose exec vydpo-bot python -c "import sqlite3; s=sqlite3.connect('/app
 | `/lang <en\|uk>` | admins | Switch language (persisted) |
 | `/live` | admins | Start or refresh the pinned live-status message |
 | `/live off` | admins | Remove the live-status message |
+| `/health` | allowed chats | State of the building equipment monitored via healthchecks.io |
 | `/token <value>` | admins, private chat | Portal backend only, hidden: supply a new refresh token |
 
 Access: read-only commands work in `ALERT_CHAT_ID`, `ALLOWED_CHAT_IDS`, and in private chats
@@ -396,3 +397,46 @@ The first caption line is what Telegram shows in the pinned bar:
 | `10:35` | Time of the reading (`dd.mm HH:MM` if not from today); `⚠️` in front means stale data |
 
 `—` stands for a missing value.
+
+## Building equipment (healthchecks.io)
+
+The bot can also watch your other building equipment (internet, cameras, lift and so on) that
+you already monitor with [healthchecks.io](https://healthchecks.io). It polls the Healthchecks
+Management API for the checks you list and posts status changes to the alert chat. (This is
+unrelated to the inverter, and the bot does not ping healthchecks.io itself.)
+
+**1. Create a read-only API key.** In healthchecks.io open your project: Project Settings ->
+API Access -> "Create API keys" -> choose the read-only key.
+
+**2. Find the check identifiers.** Each check can be listed by its slug (shown under the check's
+name, or in the check details -> Settings), by its name (any letter case, Cyrillic and spaces
+are fine), by its unique key (what a read-only key exposes) or by its UUID.
+
+**3. Configure `.env`** (both the key and the list are needed; with only one set the bot logs a
+warning and stays off):
+
+```
+HEALTHCHECKS_API_KEY=your-read-only-key
+HEALTHCHECKS_CHECKS=internet, cameras, lift
+# optional: HEALTHCHECKS_POLL_S=300 (min 60), HEALTHCHECKS_API_URL=https://healthchecks.io
+```
+
+**Alert semantics.**
+- A check going `down` gives one alert: `🔴 Lift is down (last signal 12:35)`. When it is `up`
+  again: `🟢 Lift is back up (was down 2 hours)`.
+- Grace, started, paused and new states never alert. down -> grace -> up still counts as one
+  recovery.
+- State is stored in the database, so a restart does not repeat an alert for a check that is
+  still down. Names that match no check are only logged as a warning.
+- If the API is unreachable three times in a row, the admins get one notice (nothing when it
+  recovers).
+
+**`/health`** lists every configured entry with its status (🟢 up, 🟡 grace, 🔴 down, ⏸ paused,
+🆕 new, ▶️ started, ❓ not found), the last ping time and when it was checked.
+
+**Pinned live message.** When monitoring is on, the caption gets one extra line above the
+"Data" line, for example `🩺 3/4 OK · 🔴 Lift` (paused and unmatched checks are not counted).
+It also refreshes right after an equipment alert.
+
+Keep Healthchecks' own notifications (email, Telegram, ...) switched on as a backup: they still
+reach you when the bot or the server it runs on is down.
