@@ -51,8 +51,11 @@ isn't published. Keep the secret private.
    SOLARMAN_APP_ID=<APP ID>
    SOLARMAN_APP_SECRET=<APP SECRET>
    SOLARMAN_EMAIL=<test account email>      # the account the bot logs in as
-   SOLARMAN_PASSWORD=<test account password>
+   SOLARMAN_PASSWORD_SHA256=<sha256 of the test account password>   # or SOLARMAN_PASSWORD=<plain>
    ```
+   Compute the hash locally (hidden prompt, nothing sent anywhere):
+   `uv run --no-project python -c "import getpass, hashlib; print(hashlib.sha256(getpass.getpass().encode()).hexdigest())"`.
+   Avoid `echo … | shasum` (the added newline gives a wrong hash).
    The keys identify the *application*. The email and password decide *whose plants* it can see,
    so use the read-only test account rather than the plant creator's login.
 2. Run `vydpobot discover`. Your plant should be listed. Copy its `id` to `SOLARMAN_STATION_ID`.

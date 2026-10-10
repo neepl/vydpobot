@@ -1,3 +1,5 @@
+import hashlib
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
@@ -36,6 +38,9 @@ class Settings(BaseSettings):
     solarman_app_secret: SecretStr | None = None
     solarman_email: str | None = None
     solarman_password: SecretStr | None = None  # plain text here; the client SHA-256 hashes it
+    # Alternative to SOLARMAN_PASSWORD: the lowercase hex SHA-256 of the password, so the plain
+    # password never has to be stored. Set exactly one of the two.
+    solarman_password_sha256: SecretStr | None = None
     solarman_station_id: int | None = None  # None -> first station on the account
     solarman_device_sn: str | None = None  # inverter SN; enables device-level fallback
     # Set True if Solarman's batteryPower sign is reversed for your setup
@@ -97,6 +102,27 @@ class Settings(BaseSettings):
     def _strip_slash(cls, v: str) -> str:
         return v.strip().rstrip("/")
 
+    @field_validator("solarman_password_sha256", mode="after")
+    @classmethod
+    def _check_sha256(cls, v: SecretStr | None) -> SecretStr | None:
+        if v is None or not v.get_secret_value().strip():
+            return None
+        digest = v.get_secret_value().strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(
+                "SOLARMAN_PASSWORD_SHA256 must be the 64-character hex SHA-256 of the password"
+            )
+        return SecretStr(digest)
+
+    @property
+    def solarman_password_hash(self) -> str | None:
+        """Lowercase hex SHA-256 of the Solarman password, from either setting."""
+        if self.solarman_password_sha256 is not None:
+            return self.solarman_password_sha256.get_secret_value()
+        if self.solarman_password is not None and self.solarman_password.get_secret_value():
+            return hashlib.sha256(self.solarman_password.get_secret_value().encode()).hexdigest()
+        return None
+
     @model_validator(mode="after")
     def _check_backend(self) -> "Settings":
         if self.solarman_backend == "portal":
@@ -106,8 +132,11 @@ class Settings(BaseSettings):
                 "SOLARMAN_APP_ID": self.solarman_app_id,
                 "SOLARMAN_APP_SECRET": self.solarman_app_secret,
                 "SOLARMAN_EMAIL": self.solarman_email,
-                "SOLARMAN_PASSWORD": self.solarman_password,
             }
+            if self.solarman_password and self.solarman_password_sha256:
+                raise ValueError("Set only one of SOLARMAN_PASSWORD and SOLARMAN_PASSWORD_SHA256")
+            if self.solarman_password_hash is None:
+                required["SOLARMAN_PASSWORD or SOLARMAN_PASSWORD_SHA256"] = None
         missing = [k for k, v in required.items() if v is None or not _plain(v)]
         if missing:
             raise ValueError(

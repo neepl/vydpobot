@@ -184,7 +184,8 @@ class SolarmanClient:
         app_id: str,
         app_secret: str,
         email: str,
-        password: str,
+        password: str | None = None,
+        password_sha256: str | None = None,
         tz: ZoneInfo,
         invert_battery_sign: bool = False,
         invert_grid_sign: bool = False,
@@ -194,7 +195,13 @@ class SolarmanClient:
         self._app_id = app_id
         self._app_secret = app_secret
         self._email = email
-        self._password_hash = hashlib.sha256(password.encode()).hexdigest()
+        if (password is None) == (password_sha256 is None):
+            raise ValueError("Pass exactly one of password and password_sha256")
+        self._password_hash = (
+            password_sha256.lower()
+            if password_sha256 is not None
+            else hashlib.sha256(password.encode()).hexdigest()  # type: ignore[union-attr]
+        )
         self._tz = tz
         self._inv_batt = invert_battery_sign
         self._inv_grid = invert_grid_sign
@@ -208,21 +215,15 @@ class SolarmanClient:
 
     @classmethod
     def from_settings(cls, s: Settings) -> "SolarmanClient":
-        if None in (
-            s.solarman_app_id,
-            s.solarman_app_secret,
-            s.solarman_email,
-            s.solarman_password,
-        ):
+        pw_hash = s.solarman_password_hash
+        if not (s.solarman_app_id and s.solarman_app_secret and s.solarman_email and pw_hash):
             raise SolarmanError("OpenAPI credentials are not configured")
-        assert s.solarman_app_secret and s.solarman_password and s.solarman_email
-        assert s.solarman_app_id
         return cls(
             base_url=s.solarman_base_url,
             app_id=s.solarman_app_id,
             app_secret=s.solarman_app_secret.get_secret_value(),
             email=s.solarman_email,
-            password=s.solarman_password.get_secret_value(),
+            password_sha256=pw_hash,
             tz=s.tz,
             invert_battery_sign=s.solarman_invert_battery_sign,
             invert_grid_sign=s.solarman_invert_grid_sign,

@@ -65,7 +65,20 @@ SOLARMAN_APP_ID=2023xxxxxxxx
 SOLARMAN_APP_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 SOLARMAN_EMAIL=you@example.com
 SOLARMAN_PASSWORD=your-plain-password     # hashed (SHA-256) by the bot before sending
+# or, instead of the plain password:
+# SOLARMAN_PASSWORD_SHA256=<64 lowercase hex chars>
 ```
+
+Prefer `SOLARMAN_PASSWORD_SHA256` so the plain password never sits in `.env`. The bot checks the
+format at startup (64 hex characters) and refuses to start if both are set. Compute the hash locally (the password is typed at a hidden prompt, not stored in shell history,
+and never sent anywhere):
+
+```bash
+uv run --no-project python -c "import getpass, hashlib; print(hashlib.sha256(getpass.getpass().encode()).hexdigest())"
+```
+
+Avoid `echo password | shasum`: `echo` adds a newline, which produces a different (wrong) hash.
+Online SHA-256 tools work too, but they mean typing your password into a third-party website.
 
 `discover` and `dump` need a complete `.env`; the Telegram values can be dummies such as
 `TELEGRAM_TOKEN=0:x`, `ALERT_CHAT_ID=0` when you only want to check Solarman.
