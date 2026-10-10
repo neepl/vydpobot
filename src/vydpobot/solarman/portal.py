@@ -191,6 +191,7 @@ def snapshot_from_fast_system(
         grid_w=grid,
         battery_w=battery,
         battery_state=battery_state(battery),
+        grid_status=str(raw["wireStatus"]).strip() if raw.get("wireStatus") is not None else None,
     )
 
 

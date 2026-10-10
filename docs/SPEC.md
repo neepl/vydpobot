@@ -391,3 +391,26 @@ settings: `HEALTHCHECKS_POLL_S` (default 300, min 60), `HEALTHCHECKS_API_URL` (d
   successful fetch (`bot_data["equipment_picture"]`; last_ping changes alone do not count), or
   events were produced; at most one refresh per job run.
 
+
+
+## Battery runtime during outages — `runtime.py` (pure, no I/O)
+
+- Config: `BATTERY_SHUTDOWN_SOC` (default 10, 0..50), `BATTERY_CAPACITY_KWH` (optional override,
+  else learned), `RUNTIME_WINDOW_MIN` (default 120, 15..360).
+- `on_battery(snapshot)`: DISCHARGING and |grid_w| < `GRID_IDLE_W` (50 W). `outage_active`
+  requires the newest stored sample within 15 min to satisfy the same condition (two polls).
+- `learn_capacity(points)`: segments of consecutive samples (gap <= 20 min, constant battery sign,
+  |W| >= 200, SOC monotonic within 0.5 pp jitter, moving >= 3 pp within <= 4 h); capacity =
+  trapezoid |kWh| / (|dSOC|/100); median, clamped to 1..1000 kWh; None without segments.
+- `estimate_runtime(...) -> Runtime(hours, ends_at, drain_kw, method, capped)`: None when not
+  discharging, SOC unknown or <= shutdown, or drain < 50 W. Drain is the time-weighted mean of the
+  on-battery samples in the window (method "window", needs >= 15 min coverage) else the current
+  power ("current"). Known capacity: (soc - shutdown)/100 * capacity / drain. Unknown capacity:
+  SOC slope over the continuous on-battery chain (>= 20 min, >= 1 pp) ("slope"). Capped at 72 h
+  (`capped=True`); `ends_at` rounded to 10 min.
+- `bot.runtime_context(bd, snap, now) -> (outage_active, Runtime | None)` (and `runtime_for`)
+  reads `storage.samples_between`, never Solarman. The learned capacity is cached in `bot_data`
+  (hourly). `Snapshot.grid_status` (portal `wireStatus`) is logged once per process at the first
+  detected outage.
+- Shown in `format_status`, `format_live_caption`/`format_live_summary`, `render_flow`
+  (`runtime=`, `grid_off=`) and `render_chart` (`runtime=`, `shutdown_soc=`, `soc_now=`).

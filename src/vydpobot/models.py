@@ -31,6 +31,7 @@ class Snapshot:
     battery_w: float | None  # see sign convention above
     battery_state: BatteryState = BatteryState.UNKNOWN
     battery_estimated: bool = False  # battery_w derived from the energy balance, not measured
+    grid_status: str | None = None  # raw portal wireStatus, logged to learn the "grid off" word
 
 
 @dataclass(frozen=True, slots=True)

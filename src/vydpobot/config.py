@@ -58,6 +58,14 @@ class Settings(BaseSettings):
     # Warn when the logger hasn't reported for this long (0 disables).
     stale_after_min: int = Field(default=30, ge=0)
 
+    # --- Battery runtime during grid outages ---
+    # SOC at which the inverter cuts the home supply (not readable via the cloud).
+    battery_shutdown_soc: float = Field(default=10, ge=0, le=50)
+    # Usable battery capacity, kWh. None = learn it from charge/discharge history.
+    battery_capacity_kwh: float | None = Field(default=None, gt=0, le=1000)
+    # Averaging window for the discharge power, minutes.
+    runtime_window_min: int = Field(default=120, ge=15, le=360)
+
     # --- Building equipment (healthchecks.io Management API; a read-only key is enough) ---
     healthchecks_api_key: SecretStr | None = None
     # Comma-separated; each item matches a check by slug, name, unique_key or uuid (any case).

@@ -409,6 +409,34 @@ The first caption line is what Telegram shows in the pinned bar:
 
 `—` stands for a missing value.
 
+## Battery runtime during outages
+
+When the grid goes down, the bot estimates how long the battery will keep the house running.
+
+- **Detection (and its limitation).** The cloud API has no "grid off" flag, so an outage is
+  inferred: the battery is discharging while the grid line is idle (|grid| < 50 W), on two
+  consecutive polls (this avoids flapping on a single odd sample). Limitation: a house that is
+  on the grid but runs from the battery with zero grid exchange looks the same. For the portal
+  backend the first detected outage logs the raw `wireStatus` at INFO, so the real "grid off"
+  word can be learned from the logs later.
+- **Shutdown level.** The inverter cuts the home supply at a fixed SOC. That setting cannot be
+  read through the cloud, so it is configured: `BATTERY_SHUTDOWN_SOC` (default 10).
+- **Capacity.** `BATTERY_CAPACITY_KWH` sets the usable capacity. If unset, it is learned from the
+  last 14 days of stored samples: clean charge or discharge stretches (at least 200 W, SOC moving
+  3 points or more) give energy / SOC change, and the median is used (recomputed at most hourly,
+  logged at INFO when it changes by more than 5%). Until enough history exists, the estimate falls
+  back to the SOC slope over the outage so far (needs 20 min and a 1-point drop).
+- **Averaging window.** The discharge power is averaged over the on-battery samples of the last
+  `RUNTIME_WINDOW_MIN` minutes (default 120); with less than 15 minutes of data the current power is
+  used. Estimates above 72 h show as "> 72 h". The end time is rounded to 10 minutes.
+- **Where it appears.** The `/status` and live captions get a line such as
+  `⏳ Battery lasts ≈ 5 h 20 min (until ~23:40)` and the grid line reads "Grid: off (running on
+  battery)". The pinned summary line ends with `· ⏳ 23:40`. The power-flow picture shows "grid
+  off" and "discharging · until ~23:40". `/graph` draws a dashed SOC projection down to a
+  "10% shutdown" line with the end time (the axis extends at most 12 h ahead).
+
+No extra Solarman calls are made: only the current snapshot and the stored samples are used.
+
 ## Building equipment (healthchecks.io)
 
 The bot can also watch your other building equipment (internet, cameras, lift and so on) that

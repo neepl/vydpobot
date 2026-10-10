@@ -7,7 +7,7 @@ Canvas is a 10 x 8 data-unit plane (100 px per unit at 5x4 in, 200 dpi), y point
 import io
 import math
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 import matplotlib
@@ -21,8 +21,9 @@ from matplotlib.figure import Figure  # noqa: E402
 from matplotlib.patches import Circle, FancyBboxPatch, Polygon, Rectangle  # noqa: E402
 
 from vydpobot.charts import C_BAT, C_GRID, C_LOAD, C_PV, C_THR, GRID_C, INK, INK_MUTED  # noqa: E402
-from vydpobot.i18n import Lang, fmt_ago, fmt_power, t  # noqa: E402
+from vydpobot.i18n import Lang, fmt_ago, fmt_power, fmt_when, t  # noqa: E402
 from vydpobot.models import Snapshot  # noqa: E402
+from vydpobot.runtime import Runtime  # noqa: E402
 
 Node = Literal["pv", "grid", "battery", "home"]
 Direction = Literal["to_hub", "from_hub"]
@@ -35,6 +36,7 @@ ICON = 0.7  # icon box edge, data units (= px / 100)
 EDGE = 0.35  # margin from canvas edge to node content
 TEXT_GAP = 0.3  # min clearance between text and the vertical run
 MIN_FONT = 11.0
+MIN_WRAPPED_FONT = 9.0  # two-line sub text (battery runtime) may shrink a little further
 ELBOW_DX = 1.2  # vertical run distance from the hub centre
 
 COLORS: dict[Node, str] = {"pv": C_PV, "grid": C_GRID, "battery": C_BAT, "home": C_LOAD}
@@ -224,7 +226,15 @@ def _draw_hub(ax: Axes) -> None:
 
 
 def _node_texts(
-    node: Node, snap: Snapshot, lang: Lang, watts: float | None, direction: Direction | None
+    node: Node,
+    snap: Snapshot,
+    lang: Lang,
+    watts: float | None,
+    direction: Direction | None,
+    runtime: Runtime | None = None,
+    grid_off: bool = False,
+    tz: ZoneInfo | None = None,
+    now: datetime | None = None,
 ) -> tuple[str, str, str]:
     label = t(lang, f"flow.{node}")
     if node == "battery" and snap.soc is not None:
@@ -233,7 +243,9 @@ def _node_texts(
     if node == "battery" and snap.battery_estimated and watts is not None:
         value = "≈" + value
     sub = ""
-    if node == "grid" and watts is not None:
+    if node == "grid" and grid_off:
+        sub = t(lang, "flow.grid_off")
+    elif node == "grid" and watts is not None:
         key = "idle" if direction is None else "export" if watts < 0 else "import"
         sub = t(lang, f"flow.grid_{key}")
     elif node == "battery":
@@ -247,6 +259,9 @@ def _node_texts(
             else "discharging"
         )
         sub = t(lang, f"flow.state_{state}") if state else ""
+        if runtime is not None and not runtime.capped and state == "discharging" and tz and now:
+            when = fmt_when(lang, runtime.ends_at, tz, now)
+            sub = t(lang, "flow.state_discharging_until", when=when)
     return label, value, sub
 
 
@@ -258,6 +273,10 @@ def _draw_node(
     lang: Lang,
     watts: float | None,
     d: Direction | None,
+    runtime: Runtime | None = None,
+    grid_off: bool = False,
+    tz: ZoneInfo | None = None,
+    now: datetime | None = None,
 ) -> None:
     left, top = CORNERS[node]
     color = COLORS[node]
@@ -265,7 +284,7 @@ def _draw_node(
     tx = EDGE if left else W - EDGE
     cx = EDGE + ICON / 2 if left else W - EDGE - ICON / 2
     cy = ICON_Y[top]
-    label, value, sub = _node_texts(node, snap, lang, watts, d)
+    label, value, sub = _node_texts(node, snap, lang, watts, d, runtime, grid_off, tz, now)
 
     if node == "pv":
         _icon_sun(ax, cx, cy, color)
@@ -279,17 +298,25 @@ def _draw_node(
     xv = HUB[0] + (-ELBOW_DX if left else ELBOW_DX)  # the node's vertical run
     room = (xv - TEXT_GAP - tx) if left else (tx - (xv + TEXT_GAP))
 
+    def fits(t_: Any) -> bool:
+        bb = t_.get_window_extent(renderer)
+        (x0, _), (x1, _) = ax.transData.inverted().transform(bb.get_points())
+        return x1 - x0 <= room
+
     def text(y: float, s: str, size: float, color: str, weight: str = "normal") -> None:
         t_ = ax.text(
             tx, y, s, ha=ha, va="center", fontsize=size, color=color, fontweight=weight, zorder=6
         )
         # step the font down until the text clears the vertical run
-        while t_.get_fontsize() > MIN_FONT:
-            bb = t_.get_window_extent(renderer)
-            (x0, _), (x1, _) = ax.transData.inverted().transform(bb.get_points())
-            if x1 - x0 <= room:
-                break
+        while t_.get_fontsize() > MIN_FONT and not fits(t_):
             t_.set_fontsize(t_.get_fontsize() - 0.5)
+        if not fits(t_) and " · " in s and not top:
+            # still too wide at the minimum size: break at the separator into two lines
+            t_.set_text(s.replace(" · ", "\n"))
+            t_.set_va("top")
+            t_.set_y(y + 0.2)
+            while t_.get_fontsize() > MIN_WRAPPED_FONT and not fits(t_):
+                t_.set_fontsize(t_.get_fontsize() - 0.5)
 
     if top:
         text(7.62, label, 12, INK_MUTED)
@@ -329,6 +356,8 @@ def build_flow_figure(
     now: datetime | None = None,
     stale_after_min: int = 30,
     checked_at: datetime | None = None,
+    runtime: Runtime | None = None,
+    grid_off: bool = False,
 ) -> tuple[Figure, Axes]:
     now = now or datetime.now(tz)
     watts: dict[Node, float | None] = {
@@ -348,7 +377,7 @@ def build_flow_figure(
     for node, w in watts.items():
         d = flow_direction(node, w)
         _draw_connection(ax, node, w, peak, d)
-        _draw_node(ax, renderer, node, snapshot, lang, w, d)
+        _draw_node(ax, renderer, node, snapshot, lang, w, d, runtime, grid_off, tz, now)
     _draw_hub(ax)
     text, stale = _footer(snapshot, lang, tz, now, stale_after_min, checked_at)
     ax.text(
@@ -371,6 +400,8 @@ def render_flow(
     now: datetime | None = None,
     stale_after_min: int = 30,
     checked_at: datetime | None = None,
+    runtime: Runtime | None = None,
+    grid_off: bool = False,
 ) -> bytes:
     fig, _ = build_flow_figure(
         snapshot,
@@ -379,6 +410,8 @@ def render_flow(
         now=now,
         stale_after_min=stale_after_min,
         checked_at=checked_at,
+        runtime=runtime,
+        grid_off=grid_off,
     )
     buf = io.BytesIO()
     fig.savefig(buf, format="png")

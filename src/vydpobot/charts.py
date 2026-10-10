@@ -14,13 +14,15 @@ import matplotlib.dates as mdates  # noqa: E402
 from matplotlib.axes import Axes  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 
-from vydpobot.i18n import Lang, t  # noqa: E402
+from vydpobot.i18n import Lang, fmt_when, t  # noqa: E402
 from vydpobot.models import HistoryPoint  # noqa: E402
+from vydpobot.runtime import Runtime  # noqa: E402
 
 MAX_GAP = timedelta(minutes=20)
 C_PV, C_LOAD, C_BAT, C_GRID, C_THR = "#E8A33D", "#3B7DD8", "#3BA55C", "#8A8F98", "#D64545"
 INK, INK_MUTED, GRID_C = "#1F2933", "#5F6B7A", "#E3E7EC"
 FONT = 15
+PROJECTION_MAX = timedelta(hours=12)  # how far into the future the x-axis may extend
 
 
 def _pos(v: float) -> float:
@@ -92,6 +94,61 @@ def _tick_hours(hours: int) -> int:
     return 1 if hours <= 6 else 2 if hours <= 12 else 3 if hours <= 24 else 6
 
 
+def _draw_projection(
+    bot: Axes,
+    runtime: Runtime,
+    soc_now: float,
+    shutdown_soc: float,
+    now: datetime,
+    tz: ZoneInfo,
+    lang: Lang,
+) -> datetime:
+    """Dashed SOC projection down to the shutdown level; returns the right edge of the x-axis."""
+    span = runtime.ends_at - now
+    clipped = span > PROJECTION_MAX
+    end = now + PROJECTION_MAX if clipped else runtime.ends_at
+    end_soc = (
+        soc_now + (shutdown_soc - soc_now) * min(PROJECTION_MAX / span, 1.0) if span else soc_now
+    )
+    xs = [now.astimezone(tz), end.astimezone(tz)]
+    bot.plot(xs, [soc_now, end_soc], color=C_BAT, linestyle="--", linewidth=2.5, alpha=0.55)
+    bot.axhline(shutdown_soc, color=INK_MUTED, linewidth=1, alpha=0.8)
+    bot.annotate(
+        t(lang, "chart.shutdown", soc=f"{shutdown_soc:g}"),
+        xy=(0.01, shutdown_soc),
+        xycoords=("axes fraction", "data"),
+        xytext=(0, 5),
+        textcoords="offset points",
+        fontsize=FONT - 2,
+        color=INK_MUTED,
+    )
+    label = fmt_when(lang, runtime.ends_at, tz, now, short=True)
+    if clipped:
+        label = "→ " + label
+    else:
+        bot.plot(
+            xs[1:],
+            [shutdown_soc],
+            marker="o",
+            markersize=7,
+            color=C_BAT,
+            linestyle="none",
+            clip_on=False,
+            zorder=5,
+        )
+    bot.annotate(
+        label,
+        xy=(xs[1], end_soc),
+        xytext=(-6, 9),
+        textcoords="offset points",
+        ha="right",
+        fontsize=FONT - 1,
+        color=INK,
+        fontweight="bold",
+    )
+    return end
+
+
 def _plot(
     fig: Figure,
     points: list[HistoryPoint],
@@ -100,6 +157,9 @@ def _plot(
     hours: int,
     threshold: float | None,
     now: datetime,
+    runtime: Runtime | None = None,
+    shutdown_soc: float | None = None,
+    soc_now: float | None = None,
 ) -> None:
     gs = fig.add_gridspec(2, 1, height_ratios=[2, 1], hspace=0.12)
     top = fig.add_subplot(gs[0])
@@ -143,8 +203,16 @@ def _plot(
             fontsize=FONT - 2,
             color=C_THR,
         )
-    top.set_xlim(now.astimezone(tz) - timedelta(hours=hours), now.astimezone(tz))
-    bot.xaxis.set_major_locator(mdates.HourLocator(interval=_tick_hours(hours), tz=tz))
+    if soc_now is None:
+        soc_now = next((p.soc for p in reversed(points) if p.soc is not None), None)
+    right, total = now, float(hours)
+    if runtime is not None and shutdown_soc is not None and soc_now is not None:
+        right = _draw_projection(bot, runtime, soc_now, shutdown_soc, now, tz, lang)
+        total = hours + (right - now).total_seconds() / 3600
+    if right > now:  # small right margin so the end marker is not cut by the axes edge
+        right += timedelta(hours=total * 0.02)
+    top.set_xlim(now.astimezone(tz) - timedelta(hours=hours), right.astimezone(tz))
+    bot.xaxis.set_major_locator(mdates.HourLocator(interval=_tick_hours(round(total)), tz=tz))
     bot.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=tz))
     top.tick_params(labelbottom=False)
     fig.suptitle(
@@ -178,13 +246,16 @@ def render_chart(
     hours: int,
     threshold: float | None = None,
     now: datetime | None = None,
+    runtime: Runtime | None = None,
+    shutdown_soc: float | None = None,
+    soc_now: float | None = None,
 ) -> bytes:
     now = now or datetime.now(tz)
     start = now - timedelta(hours=hours)
     pts = sorted((p for p in points if start <= p.ts <= now), key=lambda p: p.ts)
     fig = Figure(figsize=(12, 8), dpi=100, facecolor="white", layout="constrained")
     if pts:
-        _plot(fig, pts, tz, lang, hours, threshold, now)
+        _plot(fig, pts, tz, lang, hours, threshold, now, runtime, shutdown_soc, soc_now)
     else:
         _no_data(fig, lang, hours)
     buf = io.BytesIO()

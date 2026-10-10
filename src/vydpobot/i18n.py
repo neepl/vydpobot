@@ -1,6 +1,8 @@
 """Message catalogs (en, uk) and small formatting helpers."""
 
+from datetime import datetime, timedelta
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 Lang = Literal["en", "uk"]
 SUPPORTED: tuple[Lang, ...] = ("en", "uk")
@@ -121,6 +123,16 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         ),
         "live.updated": "Data: {data_time} · checked {check_time}",
         "live.stale": "⚠️ No new data since {time}",
+        "runtime.lasts": "⏳ Battery lasts ≈ {dur} (until {when})",
+        "runtime.capped": "⏳ Battery lasts > 72 h",
+        "runtime.grid_off": "Grid: off (running on battery)",
+        "runtime.dur.hm": "{h} h {m} min",
+        "runtime.dur.h": "{h} h",
+        "runtime.dur.m": "{m} min",
+        "runtime.tomorrow": "tomorrow",
+        "flow.grid_off": "grid off",
+        "flow.state_discharging_until": "discharging · until {when}",
+        "chart.shutdown": "{soc}% shutdown",
         "unit.w": "W",
         "unit.kw": "kW",
         "time.ago.min": "{n} minutes ago",
@@ -251,6 +263,16 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         ),
         "live.updated": "Дані: {data_time} · перевірено {check_time}",
         "live.stale": "⚠️ Немає нових даних з {time}",
+        "runtime.lasts": "⏳ Батареї вистачить ≈ на {dur} (до {when})",
+        "runtime.capped": "⏳ Батареї вистачить > 72 год",
+        "runtime.grid_off": "Мережа: немає (працюємо від батареї)",
+        "runtime.dur.hm": "{h} год {m} хв",
+        "runtime.dur.h": "{h} год",
+        "runtime.dur.m": "{m} хв",
+        "runtime.tomorrow": "завтра",
+        "flow.grid_off": "немає мережі",
+        "flow.state_discharging_until": "розряджається · до {when}",
+        "chart.shutdown": "{soc}% вимкнення",
         "unit.w": "Вт",
         "unit.kw": "кВт",
         "time.ago.min": "{n} хвилин тому",
@@ -347,3 +369,31 @@ def fmt_duration(lang: Lang, seconds: float) -> str:
     else:
         base, n = "time.dur.d", minutes // (24 * 60)
     return t(lang, _ago_key(base, _plural_form(lang, n)), n=n)
+
+
+def fmt_hm(lang: Lang, hours: float) -> str:
+    """Duration rounded to 10 minutes: '5 h 20 min', '40 min', '3 h' / '5 год 20 хв'."""
+    total = max(10, round(hours * 6) * 10)
+    h, m = divmod(total, 60)
+    if h and m:
+        return t(lang, "runtime.dur.hm", h=h, m=m)
+    return t(lang, "runtime.dur.h", h=h) if h else t(lang, "runtime.dur.m", m=m)
+
+
+def fmt_when(
+    lang: Lang, when: datetime, tz: ZoneInfo, now: datetime, *, short: bool = False
+) -> str:
+    """Local clock time of a future moment.
+
+    Long form: '~23:40', '~tomorrow 03:10', '~12.10 03:10'. Short form (compact summary line):
+    '23:40', '12.10 03:10'.
+    """
+    local, today = when.astimezone(tz), now.astimezone(tz).date()
+    clock = local.strftime("%H:%M")
+    if local.date() == today:
+        text = clock
+    elif local.date() == today + timedelta(days=1) and not short:
+        text = f"{t(lang, 'runtime.tomorrow')} {clock}"
+    else:
+        text = local.strftime("%d.%m %H:%M")
+    return text if short else "~" + text

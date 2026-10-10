@@ -32,8 +32,26 @@ from vydpobot.equipment import (
     health_counts,
 )
 from vydpobot.flow import render_flow
-from vydpobot.i18n import SUPPORTED, Lang, fmt_ago, fmt_duration, fmt_num, fmt_power, t
+from vydpobot.i18n import (
+    SUPPORTED,
+    Lang,
+    fmt_ago,
+    fmt_duration,
+    fmt_hm,
+    fmt_num,
+    fmt_power,
+    fmt_when,
+    t,
+)
 from vydpobot.models import BatteryState, HistoryPoint, Snapshot
+from vydpobot.runtime import (
+    GRID_IDLE_W,
+    Runtime,
+    estimate_runtime,
+    learn_capacity,
+    on_battery,
+    outage_active,
+)
 from vydpobot.solarman.portal import PortalAuthError
 from vydpobot.source import DataSource, make_source
 from vydpobot.storage import (
@@ -52,7 +70,10 @@ FAILURES_BEFORE_NOTICE = 3
 EQUIPMENT_FIRST_S = 15
 CAPTION_LIMIT = 1024
 RETENTION_DAYS = 14
-GRID_IDLE_W = 50.0
+CAPACITY_LOOKBACK = timedelta(days=14)
+CAPACITY_REFRESH_S = 3600
+CAPACITY_LOG_DELTA = 0.05
+RUNTIME_MARGIN = timedelta(minutes=10)
 BAR_CELLS = 10
 QUOTA_MIN_POLL_S = 600  # OpenAPI free tier: ~548 calls/day; realtime + device SN doubles usage
 DEFAULT_GRAPH_HOURS = 24
@@ -110,7 +131,22 @@ def _local(ts: datetime, tz: ZoneInfo, now: datetime) -> str:
     return local.strftime(fmt)
 
 
-def _status_lines(snapshot: Snapshot, lang: Lang, threshold: float | None) -> list[str]:
+def _runtime_line(rt: Runtime, lang: Lang, tz: ZoneInfo, now: datetime) -> str:
+    if rt.capped:
+        return t(lang, "runtime.capped")
+    when = fmt_when(lang, rt.ends_at, tz, now)
+    return t(lang, "runtime.lasts", dur=fmt_hm(lang, rt.hours), when=when)
+
+
+def _status_lines(
+    snapshot: Snapshot,
+    lang: Lang,
+    threshold: float | None,
+    runtime: Runtime | None = None,
+    grid_off: bool = False,
+    tz: ZoneInfo | None = None,
+    now: datetime | None = None,
+) -> list[str]:
     """Title through SOC bar of the status message (shared by /status and the live caption)."""
     na = t(lang, "status.na")
 
@@ -128,7 +164,9 @@ def _status_lines(snapshot: Snapshot, lang: Lang, threshold: float | None) -> li
     else:
         state = t(lang, "status.state.unknown")
 
-    if s.grid_w is None:
+    if grid_off or runtime is not None:
+        grid = t(lang, "runtime.grid_off")
+    elif s.grid_w is None:
         grid = f"{t(lang, 'flow.grid')}: {na}"
     elif s.grid_w > GRID_IDLE_W:
         grid = f"{t(lang, 'status.grid_import')} {power(s.grid_w)}"
@@ -140,7 +178,7 @@ def _status_lines(snapshot: Snapshot, lang: Lang, threshold: float | None) -> li
     low = threshold is not None and s.soc is not None and s.soc <= threshold
     bat_txt = na if s.soc is None else t(lang, "status.battery", soc=_num(s.soc))
     bat = f"{'🪫' if low else '🔋'} {bat_txt}"
-    return [
+    lines = [
         f"<b>{html.escape(t(lang, 'status.title'))}</b>",
         "",
         f"{STATE_EMOJI[s.battery_state]} {html.escape(state)}",
@@ -148,8 +186,11 @@ def _status_lines(snapshot: Snapshot, lang: Lang, threshold: float | None) -> li
         f"🏠 {html.escape(t(lang, 'status.load'))}: {html.escape(power(s.load_w))}",
         f"🔌 {html.escape(grid)}",
         html.escape(bat),
-        f"<code>{soc_bar(s.soc)}</code>",
     ]
+    if runtime is not None and tz is not None and now is not None:
+        lines.append(html.escape(_runtime_line(runtime, lang, tz, now)))
+    lines.append(f"<code>{soc_bar(s.soc)}</code>")
+    return lines
 
 
 def _is_stale(age: float, stale_after_min: int) -> bool:
@@ -167,11 +208,13 @@ def format_status(
     now: datetime,
     threshold: float | None = None,
     stale_after_min: int = 30,
+    runtime: Runtime | None = None,
+    grid_off: bool = False,
 ) -> str:
     """Build the HTML /status message from a snapshot."""
     s = snapshot
     age = max(0.0, (now - s.ts).total_seconds())
-    lines = _status_lines(s, lang, threshold)
+    lines = _status_lines(s, lang, threshold, runtime, grid_off, tz, now)
     lines += [
         "",
         html.escape(t(lang, "status.updated", time=_local(s.ts, tz, now), ago=fmt_ago(lang, age))),
@@ -198,7 +241,12 @@ def _kw(lang: Lang, w: float | None, *, signed: str = "none") -> str:
 
 
 def format_live_summary(
-    snapshot: Snapshot, lang: Lang, tz: ZoneInfo, now: datetime, stale: bool = False
+    snapshot: Snapshot,
+    lang: Lang,
+    tz: ZoneInfo,
+    now: datetime,
+    stale: bool = False,
+    runtime: Runtime | None = None,
 ) -> str:
     """Short first line of the live caption (shown in Telegram's pinned bar)."""
     s = snapshot
@@ -211,6 +259,9 @@ def format_live_summary(
         f"🔌 {_kw(lang, s.grid_w, signed='grid')} {t(lang, 'unit.kw')}",
         _local(s.ts, tz, now),
     ]
+    if runtime is not None:
+        until = ">72h" if runtime.capped else fmt_when(lang, runtime.ends_at, tz, now, short=True)
+        parts.append(f"⏳ {until}")
     return ("⚠️ " if stale else "") + " · ".join(parts)
 
 
@@ -222,14 +273,16 @@ def format_live_caption(
     threshold: float | None = None,
     stale_after_min: int = 30,
     equipment: FetchResult | None = None,
+    runtime: Runtime | None = None,
+    grid_off: bool = False,
 ) -> str:
     """HTML caption of the pinned live-status photo: summary, details, update time."""
     s = snapshot
     age = max(0.0, (now - s.ts).total_seconds())
     stale = _is_stale(age, stale_after_min)
     when = s.ts.astimezone(tz).strftime("%d.%m.%Y %H:%M")
-    lines = [format_live_summary(s, lang, tz, now, stale), ""]
-    lines += _status_lines(s, lang, threshold)
+    lines = [format_live_summary(s, lang, tz, now, stale, runtime), ""]
+    lines += _status_lines(s, lang, threshold, runtime, grid_off, tz, now)
     check = now.astimezone(tz).strftime("%H:%M")
     tail = ["", html.escape(t(lang, "live.updated", data_time=when, check_time=check))]
     if stale:
@@ -367,6 +420,59 @@ def get_lang(bot_data: dict[str, Any]) -> Lang:
     settings: Settings = bot_data["settings"]
     val = bot_data["storage"].get_json(KEY_LANGUAGE)
     return val if val in SUPPORTED else settings.language
+
+
+def _learned_capacity(bd: dict[str, Any], now: datetime) -> float | None:
+    """Configured capacity, else the learned one (recomputed at most hourly, cached)."""
+    settings: Settings = bd["settings"]
+    if (configured := getattr(settings, "battery_capacity_kwh", None)) is not None:
+        return float(configured)
+    cache = bd.get("capacity_cache")
+    if cache is not None and (now - cache[1]).total_seconds() < CAPACITY_REFRESH_S:
+        return cache[0]
+    try:
+        points = bd["storage"].samples_between(now - CAPACITY_LOOKBACK, now)
+        value = learn_capacity(points)
+    except Exception:
+        log.exception("Capacity learning failed")
+        return cache[0] if cache else None
+    old = cache[0] if cache else None
+    if value is not None and (old is None or abs(value - old) / old > CAPACITY_LOG_DELTA):
+        log.info("Learned battery capacity: %.1f kWh", value)
+    bd["capacity_cache"] = (value, now)
+    return value
+
+
+def runtime_context(
+    bd: dict[str, Any], snap: Snapshot | None, now: datetime
+) -> tuple[bool, Runtime | None]:
+    """(outage active, runtime estimate) from the snapshot and stored samples. Never raises."""
+    if snap is None:
+        return False, None
+    try:
+        settings: Settings = bd["settings"]
+        window = int(getattr(settings, "runtime_window_min", 120))
+        shutdown = float(getattr(settings, "battery_shutdown_soc", 10))
+        stale_min = getattr(settings, "stale_after_min", 30) or 30
+        if (now - snap.ts).total_seconds() > stale_min * 60:
+            return False, None  # old data says nothing about the present
+        span = max(timedelta(minutes=window), timedelta(minutes=15)) + RUNTIME_MARGIN
+        recent = bd["storage"].samples_between(now - span, now)
+        if not outage_active(snap, recent):
+            return False, None
+        if not bd.get("grid_status_logged") and on_battery(snap):
+            bd["grid_status_logged"] = True
+            log.info("Grid outage detected; portal wireStatus=%r", snap.grid_status)
+        rt = estimate_runtime(snap, recent, _learned_capacity(bd, now), shutdown, window, now)
+        return True, rt
+    except Exception:
+        log.exception("Runtime estimate failed")
+        return False, None
+
+
+def runtime_for(bd: dict[str, Any], snap: Snapshot | None, now: datetime) -> Runtime | None:
+    """Runtime estimate; None unless an outage is active (and the estimate is possible)."""
+    return runtime_context(bd, snap, now)[1]
 
 
 def _load_state(storage: Storage) -> AlertState:
@@ -574,7 +680,14 @@ def _gone(e: BadRequest) -> bool:
     return any(m in text for m in ("not found", "message_id_invalid", "can't be edited"))
 
 
-def _live_caption(bd: dict[str, Any], snap: Snapshot, lang: Lang, now: datetime) -> str:
+def _live_caption(
+    bd: dict[str, Any],
+    snap: Snapshot,
+    lang: Lang,
+    now: datetime,
+    runtime: Runtime | None = None,
+    grid_off: bool = False,
+) -> str:
     settings: Settings = bd["settings"]
     cache = bd.get("equipment_cache") if bd.get("equipment") is not None else None
     return format_live_caption(
@@ -585,6 +698,8 @@ def _live_caption(bd: dict[str, Any], snap: Snapshot, lang: Lang, now: datetime)
         get_threshold(bd),
         settings.stale_after_min,
         equipment=cache[0] if cache else None,
+        runtime=runtime,
+        grid_off=grid_off,
     )
 
 
@@ -604,7 +719,8 @@ async def refresh_live(
             return
         settings: Settings = bd["settings"]
         lang, now = get_lang(bd), datetime.now(UTC)
-        caption = _live_caption(bd, snap, lang, now)
+        grid_off, runtime = runtime_context(bd, snap, now)
+        caption = _live_caption(bd, snap, lang, now, runtime, grid_off)
         png = await asyncio.to_thread(
             render_flow,
             snap,
@@ -613,6 +729,8 @@ async def refresh_live(
             now=now,
             stale_after_min=settings.stale_after_min,
             checked_at=now,
+            runtime=runtime,
+            grid_off=grid_off,
         )
     except Exception:
         log.exception("Live refresh preparation failed")
@@ -729,8 +847,16 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if snap is None:
             await _reply(update, html.escape(t(lang, "bot.error")))
             return
+    grid_off, runtime = runtime_context(bd, snap, now)
     caption = format_status(
-        snap, lang, settings.tz, now, get_threshold(bd), settings.stale_after_min
+        snap,
+        lang,
+        settings.tz,
+        now,
+        get_threshold(bd),
+        settings.stale_after_min,
+        runtime=runtime,
+        grid_off=grid_off,
     )
     message = update.effective_message
     if message is not None:
@@ -744,6 +870,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 tz=settings.tz,
                 now=now,
                 stale_after_min=settings.stale_after_min,
+                runtime=runtime,
+                grid_off=grid_off,
             )
             await message.reply_photo(png, caption=caption, parse_mode=ParseMode.HTML)
             return
@@ -783,6 +911,9 @@ async def cmd_graph(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     now = datetime.now(UTC)
     try:
         points = await _graph_points(bd, now - timedelta(hours=hours), now)
+        latest = bd["storage"].latest_sample()
+        runtime = runtime_for(bd, latest, now)
+        shutdown = float(getattr(settings, "battery_shutdown_soc", 10))
         png = await asyncio.to_thread(
             render_chart,
             points,
@@ -791,6 +922,9 @@ async def cmd_graph(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             hours=hours,
             threshold=get_threshold(bd),
             now=now,
+            runtime=runtime,
+            shutdown_soc=shutdown if runtime else None,
+            soc_now=latest.soc if latest and runtime else None,
         )
     except Exception:
         log.exception("Graph failed")
@@ -897,7 +1031,8 @@ async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             now = datetime.now(UTC)
             try:
-                caption = _live_caption(bd, snap, lang, now)
+                grid_off, runtime = runtime_context(bd, snap, now)
+                caption = _live_caption(bd, snap, lang, now, runtime, grid_off)
                 png = await asyncio.to_thread(
                     render_flow,
                     snap,
@@ -906,6 +1041,8 @@ async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     now=now,
                     stale_after_min=settings.stale_after_min,
                     checked_at=now,
+                    runtime=runtime,
+                    grid_off=grid_off,
                 )
                 message_id, pinned = await _send_live(bot, chat.id, png, caption)
             except Exception:
