@@ -139,7 +139,7 @@ starting value: the rotated one in the database wins, until you put a *different
 ### Capturing the token
 
 The refresh token is visible in the JSON response of the login request (on at least the
-`FOREIGN_1` region there is no refresh-token cookie).
+`FOREIGN_1` region there is no refresh-token cookie unless "Remember me" is ticked).
 
 1. Open a **private/incognito window** at [home.solarmanpv.com](https://home.solarmanpv.com).
    Open DevTools (**F12**) **before** logging in: **Network** tab, tick **Preserve log**, and
@@ -156,8 +156,9 @@ The refresh token is visible in the JSON response of the login request (on at le
 5. **Never paste the token into chats.** Put it into `.env` on the server, or send it with
    `/token <value>` in a private chat with the bot (the bot deletes the message).
 
-Alternative: on some regions a refresh-token cookie
-`442287045fabeaa868450dec4baee7f4` exists (DevTools -> Application -> Cookies). It is HttpOnly,
+Alternative: a refresh-token cookie
+`442287045fabeaa868450dec4baee7f4` appears when **"Remember me"** is ticked at login, so the cookie
+method works then too (on some regions it may exist anyway) (DevTools -> Application -> Cookies). It is HttpOnly,
 so `document.cookie` cannot see it; copy its value by hand (it may be URL-encoded).
 
 ### Configuration
@@ -176,10 +177,11 @@ warning), because device-level data is not available through the portal. `discov
 work with both backends. They must share the bot's database, so on the server run them with
 `docker compose exec vydpo-bot deye-bot …`, not with a different `DB_PATH`.
 
-The portal's station summary has no battery power field. Until a measured source is wired in, the
-bot estimates it from the energy balance (PV + grid − load) and marks it with "≈" everywhere it is
-shown. Expect the estimate to run typically 5–10% above the true value because of inverter losses.
-A measured value, when present, always wins.
+Measured battery power comes from the portal's Flow Chart endpoint (`fast/system`), one request
+per poll. Only if that request fails (or lacks battery data) does the bot fall back to the station
+summary and estimate battery power from the energy balance (PV + grid − load), marked with "≈"
+everywhere it is shown. Expect the estimate to run typically 5–10% above the true value because of
+inverter losses.
 
 ### When the token stops working
 

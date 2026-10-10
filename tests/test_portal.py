@@ -22,6 +22,8 @@ TZ = ZoneInfo("Europe/Kyiv")
 BASE = "https://portal.test"
 TOKEN_URL = f"{BASE}/oauth2-s/oauth/token"
 STATIONS_URL = f"{BASE}/maintain-s/operating/station/search"
+FAST_URL = f"{BASE}/maintain-s/fast/system/42"
+FIXTURES = Path(__file__).parent / "fixtures"
 RT0, RT1, RT2 = "rt-boot-0000", "rt-rotated-1111", "rt-rotated-2222"
 ACCESS = "acc-secret-9999"
 
@@ -64,6 +66,10 @@ def client(storage):
 @pytest.fixture(autouse=True)
 def fast_backoff(monkeypatch):
     monkeypatch.setattr(portal_mod, "BACKOFF_S", 0.0)
+
+
+def fast_down(respx_mock) -> None:
+    respx_mock.get(FAST_URL).mock(return_value=httpx.Response(404, json={"msg": "no"}))
 
 
 def stations_ok() -> httpx.Response:
@@ -267,6 +273,7 @@ async def test_changed_env_token_wins_over_stored(respx_mock, storage):
 async def test_snapshot_aliases_portal_fields(respx_mock, client):
     respx_mock.post(TOKEN_URL).mock(return_value=token_response())
     respx_mock.post(STATIONS_URL).mock(return_value=stations_ok())
+    fast_down(respx_mock)
     snap = await client.get_snapshot(42)
     assert (snap.pv_w, snap.load_w, snap.soc) == (2000, 800, 55)
     assert snap.grid_w == -300  # sellPower -> wirePower
@@ -285,6 +292,8 @@ async def test_station_list_variants_and_missing_station(respx_mock, client):
     respx_mock.post(STATIONS_URL).mock(
         return_value=httpx.Response(200, json={"stationList": [STATION]})
     )
+    fast_down(respx_mock)
+    respx_mock.get(f"{BASE}/maintain-s/fast/system/7").mock(return_value=httpx.Response(404))
     assert await client.resolve_station_id(None) == 42
     with pytest.raises(SolarmanError, match="not found"):
         await client.get_snapshot(7)
@@ -294,6 +303,7 @@ async def test_station_list_variants_and_missing_station(respx_mock, client):
 async def test_device_sn_ignored_with_single_warning(respx_mock, client, caplog):
     respx_mock.post(TOKEN_URL).mock(return_value=token_response())
     respx_mock.post(STATIONS_URL).mock(return_value=stations_ok())
+    fast_down(respx_mock)
     with caplog.at_level("WARNING"):
         await client.get_snapshot(42, "SN123")
         await client.get_snapshot(42, "SN123")
@@ -326,6 +336,7 @@ async def test_probe_output_has_no_tokens(respx_mock, client):
     respx_mock.get(f"{BASE}/maintain-s/station/42").mock(
         return_value=httpx.Response(200, json={"id": 42, "refresh_token": RT1})
     )
+    respx_mock.get(FAST_URL).mock(return_value=httpx.Response(200, json={"batteryPower": 1}))
     respx_mock.get(f"{BASE}/maintain-s/history/power/42/record").mock(
         return_value=httpx.Response(200, json={"records": [1, 2]})
     )
@@ -338,6 +349,7 @@ async def test_probe_output_has_no_tokens(respx_mock, client):
     data = json.loads(out)
     assert data["station_id"] == 42
     assert data["devices"]["result"] == [{"deviceSn": "X1"}]
+    assert data["fast_system"]["status"] == 200
     assert [c["status"] for c in data["history_candidates"]] == [200, 404]
     assert respx_mock.calls[-1].request.url.params["day"] == "1"
 
@@ -482,3 +494,159 @@ async def test_persist_failure_falls_back_to_memory_token(respx_mock, storage, m
     await c.list_stations()  # expiring -> renews with the in-memory rotated token
     assert parse_qs(tok.calls[1].request.content.decode())["refresh_token"] == [RT1]
     assert storage.get_json(KEY_PORTAL_REFRESH_TOKEN) == RT2
+
+
+# ---------------------------------------------------------------- fast/system
+
+
+def fast(**kw) -> dict:
+    return kw
+
+
+def snap(raw: dict, **kw):
+    return portal_mod.snapshot_from_fast_system(raw, TZ, **kw)
+
+
+def real_fast() -> dict:
+    return json.loads((FIXTURES / "portal_fast_system_real.json").read_text())
+
+
+def test_fast_real_fixture():
+    s = snap(real_fast())
+    assert s.battery_w == 20646 and s.battery_state is BatteryState.CHARGING
+    assert s.battery_estimated is False
+    assert (s.grid_w, s.pv_w, s.load_w, s.soc) == (20303, 8644, 6916, 75.33)
+    assert int(s.ts.timestamp()) == 1791618283 and s.ts.tzinfo is not None
+
+
+@pytest.mark.parametrize("sign", [1, -1])
+def test_fast_discharge(sign):
+    raw = fast(
+        batteryStatus="DISCHARGE",
+        dischargePower=3000 * sign,
+        chargePower=0,
+        batteryPower=3000 * sign,
+    )
+    s = snap(raw)
+    assert s.battery_w == -3000 and s.battery_state is BatteryState.DISCHARGING
+
+
+def test_fast_idle():
+    s = snap(fast(batteryStatus="STATIC", batteryPower=-5.0, chargePower=-5.0, dischargePower=0))
+    assert s.battery_w == 0.0 and s.battery_state is BatteryState.IDLE
+
+
+def test_fast_export_and_wire_only():
+    s = snap(fast(buyPower=0, gridPower=1500, wirePower=1500, wireStatus="SELL"))
+    assert s.grid_w == -1500
+    assert snap(fast(wirePower=700, wireStatus="PURCHASE")).grid_w == 700
+    assert snap(fast(wirePower=700, wireStatus="sell")).grid_w == -700
+    assert snap(fast(wirePower=700)).grid_w is None
+
+
+def test_fast_unknown_status_warns_once(caplog):
+    warned: set[str] = set()
+    raw = fast(batteryStatus="WEIRD", chargePower=-500.0, dischargePower=0.0)
+    with caplog.at_level("WARNING"):
+        assert snap(raw, warned=warned).battery_w == 500
+        assert snap(raw, warned=warned).battery_w == 500
+    assert caplog.text.count("batteryStatus") == 1
+
+
+def test_fast_fallbacks_without_status():
+    assert snap(fast(dischargePower=200.0, chargePower=0.0)).battery_w == -200
+    assert snap(fast(batteryPower=-800.0)).battery_w == 800
+    assert snap(fast(batteryPower=800.0)).battery_w == -800
+
+
+def test_fast_battery_missing():
+    s = snap(fast(generationPower=1))
+    assert s.battery_w is None and s.battery_state is BatteryState.UNKNOWN
+
+
+def test_fast_invert_flags():
+    s = snap(real_fast(), invert_battery=True, invert_grid=True)
+    assert s.battery_w == -20646 and s.grid_w == -20303
+
+
+@respx.mock(assert_all_called=False)
+async def test_snapshot_uses_one_fast_request(respx_mock, client):
+    respx_mock.post(TOKEN_URL).mock(return_value=token_response())
+    route = respx_mock.get(FAST_URL).mock(return_value=httpx.Response(200, json=real_fast()))
+    stations = respx_mock.post(STATIONS_URL).mock(return_value=stations_ok())
+    s = await client.get_snapshot(42)
+    assert route.call_count == 1 and not stations.called
+    assert s.battery_w == 20646 and not s.battery_estimated
+
+
+@respx.mock(assert_all_called=False)
+async def test_fast_error_falls_back_to_estimate(respx_mock, client):
+    respx_mock.post(TOKEN_URL).mock(return_value=token_response())
+    respx_mock.get(FAST_URL).mock(return_value=httpx.Response(500))
+    respx_mock.post(STATIONS_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"data": [{**STATION, "batteryPower": None, "gridPower": None, "sellPower": 0}]},
+        )
+    )
+    s = await client.get_snapshot(42)
+    assert s.battery_estimated is True and s.battery_w == 1200
+
+
+@respx.mock(assert_all_called=False)
+async def test_fast_without_battery_merges_summary(respx_mock, client):
+    respx_mock.post(TOKEN_URL).mock(return_value=token_response())
+    respx_mock.get(FAST_URL).mock(
+        return_value=httpx.Response(
+            200, json={"generationPower": 2500, "usePower": 500, "lastUpdateTime": 1791618283}
+        )
+    )
+    respx_mock.post(STATIONS_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        **STATION,
+                        "batteryPower": None,
+                        "gridPower": None,
+                        "buyPower": 0,
+                        "sellPower": 0,
+                    }
+                ]
+            },
+        )
+    )
+    s = await client.get_snapshot(42)
+    assert s.pv_w == 2500 and s.load_w == 500 and s.soc == 55
+    assert s.battery_estimated is True and s.battery_w == 2000
+
+
+@respx.mock(assert_all_called=False)
+async def test_fast_auth_rejection_propagates(respx_mock, client):
+    respx_mock.post(TOKEN_URL).mock(return_value=httpx.Response(400, json={"error": "bad"}))
+    stations = respx_mock.post(STATIONS_URL).mock(return_value=stations_ok())
+    with pytest.raises(PortalAuthError):
+        await client.get_snapshot(42)
+    assert not stations.called
+
+
+@respx.mock(assert_all_called=False)
+async def test_fast_errors_scrubbed(respx_mock, client):
+    respx_mock.post(TOKEN_URL).mock(return_value=token_response())
+    respx_mock.get(FAST_URL).mock(return_value=httpx.Response(400, text=f"bad {ACCESS}"))
+    with pytest.raises(SolarmanError) as ei:
+        await client._fast_system(42)
+    assert ACCESS not in str(ei.value)
+
+
+@respx.mock(assert_all_called=False)
+async def test_raw_debug_includes_fast_system(respx_mock, client):
+    respx_mock.post(TOKEN_URL).mock(return_value=token_response())
+    respx_mock.get(FAST_URL).mock(return_value=httpx.Response(200, json=real_fast()))
+    respx_mock.post(STATIONS_URL).mock(return_value=stations_ok())
+    respx_mock.post(f"{BASE}/maintain-s/power/system/deviceList").mock(
+        return_value=httpx.Response(200, json={"data": []})
+    )
+    out = await client.raw_debug(42)
+    assert out["fast_system"]["batteryStatus"] == "CHARGE" and out["station_summary"]["id"] == 42

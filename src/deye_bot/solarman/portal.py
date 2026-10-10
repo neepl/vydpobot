@@ -32,6 +32,9 @@ from deye_bot.solarman.client import (
     TIMEOUT_S,
     SolarmanError,
     _num,
+    _ts,
+    battery_state,
+    merge_snapshots,
     snapshot_from_station,
     with_estimated_battery,
 )
@@ -56,6 +59,7 @@ PATH_TOKEN = "/oauth2-s/oauth/token"
 PATH_STATIONS = "/maintain-s/operating/station/search"
 PATH_DEVICES = "/maintain-s/power/system/deviceList"
 PATH_STATION_DETAIL = "/maintain-s/station/{id}"
+PATH_FAST_SYSTEM = "/maintain-s/fast/system/{id}"  # Flow Chart: measured battery power
 # Candidate (unconfirmed) day-history endpoints, tried read-only by `portal-probe`.
 HISTORY_CANDIDATES = (
     "/maintain-s/history/power/{id}/record",
@@ -99,6 +103,95 @@ def alias_station(raw: dict) -> dict:
         if src in raw and dst not in raw:
             out[dst] = raw[src]
     return out
+
+
+_BATTERY_CHARGE = ("CHARGE",)
+_BATTERY_DISCHARGE = ("DISCHARGE",)
+_BATTERY_IDLE = ("STATIC", "IDLE", "STANDBY", "NONE", "NORMAL")
+_WIRE_IMPORT = ("PURCHASE", "BUY")
+_WIRE_EXPORT = ("SELL", "GRID", "FEED", "EXPORT")
+
+
+def _abs(raw: dict, key: str) -> float | None:
+    v = _num(raw.get(key))
+    return None if v is None else abs(v)
+
+
+def _status(raw: dict, key: str, known: tuple[str, ...], warned: set[str] | None) -> str:
+    """Upper-cased status text; warns once (per `warned` set) when it matches no known prefix."""
+    value = raw.get(key)
+    text = str(value).strip().upper() if value is not None else ""
+    if text and not text.startswith(known) and (warned is None or f"{key}={text}" not in warned):
+        if warned is not None:
+            warned.add(f"{key}={text}")
+        log.warning("Unrecognized portal %s value %r", key, value)
+    return text
+
+
+def _fast_grid(raw: dict, warned: set[str] | None) -> float | None:
+    buy, sell = _abs(raw, "buyPower"), _abs(raw, "gridPower")
+    if buy is not None or sell is not None:
+        return (buy or 0.0) - (sell or 0.0)
+    wire = _abs(raw, "wirePower")
+    if wire is None:
+        return None
+    status = _status(raw, "wireStatus", _WIRE_IMPORT + _WIRE_EXPORT, warned)
+    if status.startswith(_WIRE_IMPORT):
+        return wire
+    if status.startswith(_WIRE_EXPORT):
+        return -wire
+    return None
+
+
+def _fast_battery(raw: dict, warned: set[str] | None) -> float | None:
+    total = _abs(raw, "batteryPower")
+    charge, discharge = _abs(raw, "chargePower"), _abs(raw, "dischargePower")
+    if total is None and (charge is not None or discharge is not None):
+        total = max(charge or 0.0, discharge or 0.0)
+    status = _status(
+        raw, "batteryStatus", _BATTERY_CHARGE + _BATTERY_DISCHARGE + _BATTERY_IDLE, warned
+    )
+    if total is not None:
+        if status.startswith(_BATTERY_CHARGE):
+            return total
+        if status.startswith(_BATTERY_DISCHARGE):
+            return -total
+        if status.startswith(_BATTERY_IDLE):
+            return 0.0
+    if discharge and not charge:
+        return -discharge
+    if charge:
+        return charge
+    signed = _num(raw.get("batteryPower"))
+    return None if signed is None else -signed  # portal convention: negative = charging
+
+
+def snapshot_from_fast_system(
+    raw: dict,
+    tz: ZoneInfo,
+    invert_battery: bool = False,
+    invert_grid: bool = False,
+    warned: set[str] | None = None,
+) -> Snapshot:
+    """Normalize `GET /maintain-s/fast/system/{id}` (the portal Flow Chart) into a Snapshot.
+
+    Battery power is measured here, with the portal's reversed sign (negative = charging), so
+    the direction comes from `batteryStatus`. `wirePower` is a grid-line magnitude, not export.
+    """
+    grid, battery = _fast_grid(raw, warned), _fast_battery(raw, warned)
+    if invert_grid and grid is not None:
+        grid = -grid
+    if invert_battery and battery is not None:
+        battery = -battery
+    return Snapshot(
+        ts=_ts(raw.get("lastUpdateTime"), tz),
+        soc=_num(raw.get("batterySoc")),
+        pv_w=_num(raw.get("generationPower")),
+        load_w=_num(raw.get("usePower")),
+        grid_w=grid,
+        battery_w=battery,
+        battery_state=battery_state(battery),
+    )
 
 
 def _redact(obj: Any) -> Any:
@@ -148,6 +241,7 @@ class PortalClient:
         self._secrets: set[str] = set()
         self._station_id: int | None = None
         self._warned_sn = False
+        self._warned_status: set[str] = set()
         self._bootstrap(bootstrap_token)
 
     @classmethod
@@ -411,10 +505,34 @@ class PortalClient:
         if device_sn and not self._warned_sn:
             self._warned_sn = True
             log.warning("SOLARMAN_DEVICE_SN is ignored by the portal backend")
+        try:
+            primary = snapshot_from_fast_system(
+                await self._fast_system(station_id),
+                self._tz,
+                self._inv_batt,
+                self._inv_grid,
+                self._warned_status,
+            )
+        except PortalAuthError:
+            raise
+        except SolarmanError as e:
+            log.warning("fast/system failed, using station summary: %s", self._scrub(str(e)))
+        else:
+            if primary.battery_w is not None:
+                return primary
+            log.warning("fast/system has no battery power, merging station summary")
+            return with_estimated_battery(merge_snapshots(primary, await self._summary(station_id)))
+        return with_estimated_battery(await self._summary(station_id))
+
+    async def _fast_system(self, station_id: int) -> dict:
+        body = await self._request("GET", PATH_FAST_SYSTEM.format(id=station_id))
+        if not isinstance(body, dict):
+            raise SolarmanError("fast/system: unexpected response")
+        return body
+
+    async def _summary(self, station_id: int) -> Snapshot:
         raw = alias_station(await self._station(station_id))
-        return with_estimated_battery(
-            snapshot_from_station(raw, self._tz, self._inv_batt, self._inv_grid)
-        )
+        return snapshot_from_station(raw, self._tz, self._inv_batt, self._inv_grid)
 
     async def get_history(
         self, station_id: int, start: datetime, end: datetime
@@ -423,6 +541,7 @@ class PortalClient:
 
     async def raw_debug(self, station_id: int, device_sn: str | None = None) -> dict:
         return {
+            "fast_system": await self._fast_system(station_id),
             "station_summary": await self._station(station_id),
             "devices": await self.list_devices(station_id),
         }
@@ -443,6 +562,7 @@ class PortalClient:
             out["devices"] = await self._attempt(self.list_devices(sid))
             detail = PATH_STATION_DETAIL.format(id=sid)
             out["station_detail"] = await self._probe_get(detail, None)
+            out["fast_system"] = await self._probe_get(PATH_FAST_SYSTEM.format(id=sid), None)
             params = {"year": today.year, "month": today.month, "day": today.day}
             out["history_candidates"] = [
                 await self._probe_get(p.format(id=sid), params) for p in HISTORY_CANDIDATES

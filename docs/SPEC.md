@@ -280,7 +280,7 @@ Reference implementation studied: github.com/Aksolotl123/ha-solarman-cloud (2026
   HTTP 412 `AUTH_SLIDE_ERROR`. **Never attempt password login.**
 - User logs in once in a browser (private window, **test account**), copies `refresh_token` from the JSON
   response of the `oauth2-s/oauth/token` login request (DevTools → Network; some regions also have
-  an HttpOnly cookie `442287045fabeaa868450dec4baee7f4`, value may be URL-encoded →
+  an HttpOnly cookie `442287045fabeaa868450dec4baee7f4`, set when "Remember me" is ticked at login; value may be URL-encoded →
   `urllib.parse.unquote`), then closes the window **without logging out**.
 - Renewal: `POST {base}/oauth2-s/oauth/token`, form-urlencoded
   `grant_type=refresh_token, refresh_token=<rt>, client_id=test, system=SOLARMAN[, area=<code>]`,
@@ -295,7 +295,22 @@ Reference implementation studied: github.com/Aksolotl123/ha-solarman-cloud (2026
   calls until a new token is supplied).
 
 ### Data endpoints (Bearer access token, JSON, browser headers)
-- Stations + live summary: `POST /maintain-s/operating/station/search` `{"page":1,"size":100}` →
+- **Primary (live snapshot): `GET /maintain-s/fast/system/{stationId}`** (the portal Flow Chart; one
+  request per poll). Returns MEASURED battery power. Normalized by
+  `snapshot_from_fast_system` (portal.py). Fields: `lastUpdateTime`, `batterySoc`, `generationPower`
+  (pv), `usePower` (load), `buyPower` (import), `gridPower` (feed-in/export), `wirePower` (grid-line
+  MAGNITUDE, not export), `batteryPower`/`chargePower`/`dischargePower`, `batteryStatus`, `wireStatus`.
+  - `grid_w = abs(buyPower) - abs(gridPower)`; if both absent, `wirePower` signed by `wireStatus`
+    (PURCHASE/BUY = +, SELL/GRID/FEED*/EXPORT = -, else None).
+  - Battery sign is REVERSED vs. ours (negative = charging), so the magnitude comes from
+    `abs(batteryPower)` (or max of charge/discharge) and the direction from `batteryStatus`
+    (CHARGE* = +, DISCHARGE* = -, STATIC/IDLE/STANDBY/NONE/NORMAL = 0; case-insensitive prefix).
+    Unknown/missing status: discharge-only -> -, charge -> +, else `-batteryPower`, else None.
+    Idle/export vocabulary is unconfirmed; an unrecognized status value is logged once per client.
+  - Fallback: on a non-auth `SolarmanError`, or `battery_w is None`, the station-search snapshot
+    is used (merged via `merge_snapshots`) and `with_estimated_battery` fills the battery (marked
+    estimated). `PortalAuthError` always propagates.
+- Stations + live summary (fallback source; station id resolved once and cached): `POST /maintain-s/operating/station/search` `{"page":1,"size":100}` →
   `data` (or `stationList`) list; entries have `id`, `name`, `generationPower`, `usePower`,
   `gridPower`, `buyPower`, `batterySoc`, `lastUpdateTime`, `networkStatus`, possibly more.
   Normalize with the existing `snapshot_from_station` after aliasing portal names to OpenAPI names
@@ -337,7 +352,7 @@ bot.py and `__main__.py` use only `make_source`/`DataSource`.
 
 ### CLI
 - `discover`, `dump` work for both backends via `DataSource`.
-- `deye-bot portal-probe [--out FILE]`: renew token, list stations, device list, station detail, try
+- `deye-bot portal-probe [--out FILE]`: renew token, list stations, device list, station detail, fast/system, try
   history candidates; write scrubbed JSON (tokens removed) to stdout/FILE for the user to share.
 
 ### Quota note (OpenAPI)
