@@ -1,5 +1,6 @@
 """Render the power / battery chart to PNG bytes (matplotlib Agg, no pyplot)."""
 
+import calendar
 import io
 import math
 from collections.abc import Callable
@@ -14,8 +15,8 @@ import matplotlib.dates as mdates  # noqa: E402
 from matplotlib.axes import Axes  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 
-from vydpobot.i18n import Lang, fmt_when, t  # noqa: E402
-from vydpobot.models import HistoryPoint  # noqa: E402
+from vydpobot.i18n import Lang, fmt_when, month_name, t  # noqa: E402
+from vydpobot.models import DayStats, HistoryPoint  # noqa: E402
 from vydpobot.runtime import Runtime  # noqa: E402
 
 MAX_GAP = timedelta(minutes=20)
@@ -258,6 +259,88 @@ def render_chart(
         _plot(fig, pts, tz, lang, hours, threshold, now, runtime, shutdown_soc, soc_now)
     else:
         _no_data(fig, lang, hours)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    return buf.getvalue()
+
+
+def render_month_chart(
+    days: list[DayStats],
+    *,
+    year: int,
+    month: int,
+    tz: ZoneInfo,
+    lang: Lang,
+    now: datetime | None = None,
+) -> bytes:
+    """Grouped daily bars (solar, consumption, from grid) for one month; today is hatched."""
+    today = (now or datetime.now(tz)).astimezone(tz).date()
+    n = calendar.monthrange(year, month)[1]
+    by_day = {d.day.day: d for d in days if (d.day.year, d.day.month) == (year, month)}
+    fig = Figure(figsize=(12, 8), dpi=100, facecolor="white", layout="constrained")
+    title = f"{month_name(lang, month)} {year}"
+    if not any(
+        v is not None for d in by_day.values() for v in (d.pv_kwh, d.home_kwh, d.grid_import_kwh)
+    ):
+        ax = fig.add_subplot(111)
+        ax.set_axis_off()
+        ax.text(
+            0.5,
+            0.5,
+            t(lang, "chart.no_data"),
+            ha="center",
+            va="center",
+            fontsize=FONT + 3,
+            color=INK_MUTED,
+            transform=ax.transAxes,
+        )
+        fig.suptitle(title, fontsize=FONT + 3, color=INK, x=0.02, ha="left")
+    else:
+        ax = fig.add_subplot(111)
+        _style(ax, t(lang, "month.axis"))
+        width = 0.27
+        series = (
+            ("chart.pv", C_PV, lambda d: d.pv_kwh, -width),
+            ("chart.load", C_LOAD, lambda d: d.home_kwh, 0.0),
+            ("month.grid", C_GRID, lambda d: d.grid_import_kwh, width),
+        )
+        for label, color, get, offset in series:
+            xs, hs, partial_x, partial_h = [], [], [], []
+            for day, d in by_day.items():
+                v = get(d)
+                if v is None:
+                    continue
+                if d.day == today:
+                    partial_x.append(day + offset)
+                    partial_h.append(v)
+                else:
+                    xs.append(day + offset)
+                    hs.append(v)
+            ax.bar(xs, hs, width=width, color=color, label=t(lang, label))
+            if partial_x:  # today is incomplete: lighter and hatched
+                ax.bar(
+                    partial_x,
+                    partial_h,
+                    width=width,
+                    color=color,
+                    alpha=0.45,
+                    hatch="//",
+                    edgecolor=color,
+                    linewidth=0,
+                )
+        ax.set_xlim(0.4, n + 0.6)
+        ax.set_xticks(range(1, n + 1))
+        ax.tick_params(axis="x", labelsize=FONT - 4)
+        ax.legend(
+            loc="lower left",
+            bbox_to_anchor=(0, 1.0),
+            ncol=3,
+            frameon=False,
+            fontsize=FONT - 1,
+            columnspacing=1.5,
+            handlelength=1.6,
+        )
+        fig.suptitle(title, fontsize=FONT + 3, color=INK, x=0.02, ha="left")
     buf = io.BytesIO()
     fig.savefig(buf, format="png")
     return buf.getvalue()

@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from vydpobot.config import Settings
-from vydpobot.models import BATTERY_DEADBAND_W, HistoryPoint, Snapshot, battery_state
+from vydpobot.models import BATTERY_DEADBAND_W, DayStats, HistoryPoint, Snapshot, battery_state
 from vydpobot.quota import ApiQuota
 from vydpobot.runtime import GRID_IDLE_W, on_battery
 from vydpobot.storage import Storage
@@ -27,6 +27,7 @@ BACKOFF_S = 1.0  # doubled after each failed attempt
 TOKEN_REFRESH_MARGIN_S = 3600
 AUTH_BACKOFF_BASE_S = 300.0  # after the 1st rejected login; doubles per consecutive failure
 AUTH_BACKOFF_MAX_S = 3600.0
+HISTORY_MAX_DAYS = 30  # OpenAPI limit of one timeType=2 (daily) history request
 OUTAGE_REFRESH_S = 300.0  # min spacing of outage-suspected device refreshes; also the "old" age
 __all__ = ["BATTERY_DEADBAND_W", "battery_state"]  # re-exported for callers/tests
 
@@ -190,6 +191,29 @@ def history_from_station(
         for i in items
     ]
     return sorted(points, key=lambda p: p.ts)
+
+
+def day_stats_from_station(items: list[dict]) -> list[DayStats]:
+    """Per-day energy items of a timeType=2 history response -> sorted DayStats (kWh)."""
+    by_day: dict[date, DayStats] = {}
+    for i in items:
+        y, m, d = _num(i.get("year")), _num(i.get("month")), _num(i.get("day"))
+        if y is None or m is None or d is None:
+            continue
+        try:
+            day = date(int(y), int(m), int(d))
+        except ValueError:
+            continue
+        by_day[day] = DayStats(
+            day=day,
+            pv_kwh=_num(i.get("generationValue")),
+            home_kwh=_num(i.get("useValue")),
+            grid_import_kwh=_num(i.get("buyValue")),
+            grid_export_kwh=_num(i.get("gridValue")),
+            charge_kwh=_num(i.get("chargeValue")),
+            discharge_kwh=_num(i.get("dischargeValue")),
+        )
+    return [by_day[d] for d in sorted(by_day)]
 
 
 def merge_snapshots(primary: Snapshot, fallback: Snapshot) -> Snapshot:
@@ -418,6 +442,31 @@ class SolarmanClient:
         body = {"stationId": station_id, "startTime": d, "endTime": d, "timeType": 1}
         data = await self._call("/station/v1.0/history", body)
         return data.get("stationDataItems") or []
+
+    async def daily_stats(self, station_id: int, start: date, end: date) -> list[DayStats]:
+        """Per-day energy totals for start..end (inclusive), sorted by day.
+
+        The API allows 30 days per request, so longer ranges are split. Each request counts in
+        the quota; at 100% of the daily budget this raises (code "budget") before any request.
+        """
+        out: dict[date, DayStats] = {}
+        chunk_start = start
+        while chunk_start <= end:
+            chunk_end = min(chunk_start + timedelta(days=HISTORY_MAX_DAYS - 1), end)
+            if self.quota is not None and self.quota.exhausted:
+                raise SolarmanError("Solarman API budget exhausted", code="budget")
+            body = {
+                "stationId": station_id,
+                "timeType": 2,
+                "startTime": chunk_start.isoformat(),
+                "endTime": chunk_end.isoformat(),
+            }
+            data = await self._call("/station/v1.0/history", body)
+            for d in day_stats_from_station(data.get("stationDataItems") or []):
+                if start <= d.day <= end:
+                    out[d.day] = d
+            chunk_start = chunk_end + timedelta(days=1)
+        return [out[d] for d in sorted(out)]
 
     async def raw_debug(
         self, station_id: int, device_sn: str | None = None, history: bool = False

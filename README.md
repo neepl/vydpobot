@@ -20,6 +20,10 @@ SUN-xK-SG04LP3) through the Solarman Cloud OpenAPI. It runs in Docker on a small
   three times in a row, and tells you when it is back.
 - `/graph [hours]`: chart of PV, load, battery, grid and SOC (1..48 h, default 24) with an
   energy summary.
+- `/month [YYYY-MM]`: grouped daily bars (solar, consumption, from grid) and monthly totals with
+  the self-sufficiency percentage; a report of the previous month is posted automatically on the
+  1st (OpenAPI backend). See "Monthly statistics".
+- A fresh pinned live message every day. See "Daily fresh live message".
 - Runtime threshold and language (English / Ukrainian) changes, persisted in SQLite.
 - 14 days of local samples are kept so charts still work if the cloud history call fails.
 
@@ -262,6 +266,10 @@ The free OpenAPI tier for Smart accounts allows at most 3 plants and 200 000 cal
   also shown in the 90% daily-budget notice. `vydpobot dump` prints it too.
 - `/status` and `/live` use no API calls: they show the latest poll result (or the newest stored
   sample after a restart).
+- `/month` and the monthly report: 1 call for a month of up to 30 days, 2 for a 31-day month, only
+  when the month is not cached. A month that has ended is cached forever; the current month is
+  refetched at most once an hour. At 100% of the daily budget the cached data is used (or an
+  error is shown when there is none).
 - `/graph` uses the stored samples first, when they cover the requested window (oldest sample
   within 15 min of the start, no gap over 30 min). Otherwise it fetches the API history once and
   stores those points, so later charts need no API call.
@@ -314,7 +322,7 @@ the threshold before the alert cycle resets (SOC readings jitter by about 1 %).
 ## Dry run before deploying
 
 ```bash
-uv run vydpobot preview [--out DIR] [--lang en|uk] [--hours N] [--no-graph] [--no-equipment]
+uv run vydpobot preview [--out DIR] [--lang en|uk] [--hours N] [--no-graph] [--no-equipment] [--no-month]
 ```
 
 Runs one full bot cycle on your machine and shows what the bot would do, without Telegram:
@@ -325,7 +333,9 @@ Runs one full bot cycle on your machine and shows what the bot would do, without
   (outage, estimate, battery capacity used and whether it is configured or learned) and the
   Solarman API calls used.
 - **Writes** to `--out` (default `./preview`): `status_flow.png`, `live_flow.png`,
-  `graph_{hours}h.png` (`--hours` 1..48, default 24) and `report.txt` (the same text as the
+  `graph_{hours}h.png` (`--hours` 1..48, default 24), `month_{YYYY-MM}.png` (the current month,
+  with a MONTH section in the text; skipped with a note on the portal backend or with
+  `--no-month`) and `report.txt` (the same text as the
   terminal). The absolute paths are listed at the end.
 
 A failing step (for example healthchecks.io being down) is shown as an error in its section and
@@ -333,7 +343,8 @@ the rest still runs. The exit code is 0 if the Solarman poll succeeded, 1 if it 
 
 Cost: 1 to 3 Solarman API calls (the realtime call, a device call when the grid shows no flow,
 and the history call of the graph when the local samples do not cover the window; skip it with
-`--no-graph`). It sends nothing to Telegram and works on a temporary copy of `DB_PATH` (with its
+`--no-graph`; the monthly statistics add 1 to 2 calls for an uncached month, skip them with
+`--no-month`). It sends nothing to Telegram and works on a temporary copy of `DB_PATH` (with its
 `-wal`/`-shm` files), which is deleted afterwards. The one exception is the portal backend: its
 refresh token is single-use, so if the preview renews it, the new token (and only that) is written
 back to the real database. Otherwise the bot would be left with a dead token.
@@ -444,6 +455,7 @@ docker compose exec vydpobot python -c "import sqlite3; s=sqlite3.connect('/app/
 | `/start`, `/help` | allowed chats | Show help |
 | `/status` | allowed chats | Live power flow and battery state |
 | `/graph [hours]` | allowed chats | Chart for the last 1..48 hours (default 24) |
+| `/month [YYYY-MM]` | allowed chats | Daily bars and totals for a month (default: this month; OpenAPI only) |
 | `/threshold` | allowed chats | Show current alert threshold and step |
 | `/threshold <5..100>` | admins | Set threshold (persisted; resets the alert cycle) |
 | `/lang` | allowed chats | Show current language |
@@ -490,6 +502,55 @@ The first caption line is what Telegram shows in the pinned bar:
 | `10:35` | Time of the reading (`dd.mm HH:MM` if not from today); `⚠️` in front means stale data |
 
 `—` stands for a missing value.
+
+## Daily fresh live message
+
+By default (`LIVE_RESET_TIME=00:00`, local `TIMEZONE`) the bot replaces every live message with a
+new one once a day: it deletes the old message, sends a new photo with the current caption and
+image (from the latest stored data, no API call), pins it silently and remembers its creation time.
+This keeps the pinned message fresh and recent in the chat.
+
+- The check runs in a daily job at that time and at the start of every live refresh, so a bot that
+  was down at midnight resets on its first refresh after the start (3 s after startup).
+- Telegram only lets a bot delete messages younger than 48 hours. The daily reset stays well inside
+  that limit. If the delete still fails, the bot unpins the old message instead and the new one is
+  pinned anyway.
+- Upgrading: live messages created before this feature get "now" as their creation time on the
+  first start, so nothing is reset immediately.
+- Optional: every pin leaves a "bot pinned a photo" service notice in the group. If you also give
+  the bot the **Delete messages** admin right (besides "Pin Messages"), it removes its own notices
+  automatically. Without the right the notices stay; nothing else changes.
+- Set `LIVE_RESET_TIME=` (empty) to disable the daily reset. `/live` behaves as before.
+
+## Monthly statistics
+
+`/month` (allowed chats) shows grouped daily bars for solar generation, home consumption and
+energy bought from the grid, plus a caption with the totals. `/month 2026-09` shows another
+month; future months are rejected. Today's bars are drawn lighter and hatched because the day is
+not finished.
+
+```
+📅 October 2026 (1–10)
+☀️ Solar: 382.7 kWh
+🏠 Consumption: 712.1 kWh
+🔌 From grid: 312.0 kWh
+🔋 Self-sufficiency: 56%
+```
+
+The range `(1–10)` appears only for the current month; "To grid" only if the export is above 0.
+Self-sufficiency is `1 − from grid / consumption`, limited to 0..100%.
+
+- Data: the OpenAPI daily history (`timeType 2`, kWh per day). It needs `SOLARMAN_BACKEND=openapi`;
+  the portal backend answers that the statistics are unavailable.
+- Quota: 1 request for a month of up to 30 days, 2 for a 31-day month (the API allows 30 days
+  per request), only when the month is not cached. Results are cached in the database; a month that
+  has ended (and was fetched after the day following its end) is final and never fetched again,
+  the current month is refetched when older than an hour.
+- Automatic report: on the 1st of each month at `MONTHLY_REPORT_TIME` (default `09:00`) the
+  previous month is posted to `ALERT_CHAT_ID`. The posted month is stored, so a restart never
+  posts it twice; if the bot was down at that time, it posts after the next start on the same
+  day. A failed attempt is retried every 30 minutes that day. Set `MONTHLY_REPORT_TIME=` (empty)
+  to disable it.
 
 ## Battery runtime during outages
 

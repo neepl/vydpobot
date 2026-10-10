@@ -15,6 +15,7 @@ _HELP_EN = (
     "/lang [en|uk] - show or set the interface language\n"
     "/live - pin a live status message that updates on every poll (admin)\n"
     "/live off - stop and remove the live message (admin)\n"
+    "/month [YYYY-MM] - monthly chart and statistics (default: this month)\n"
     "/health - state of the building equipment (healthchecks.io)\n"
     "/help - this message"
 )
@@ -27,6 +28,7 @@ _HELP_UK = (
     "/live - закріпити повідомлення зі станом, що оновлюється під час кожного опитування "
     "(адмін)\n"
     "/live off - зупинити й видалити живе повідомлення (адмін)\n"
+    "/month [РРРР-ММ] - графік і статистика за місяць (типово: поточний)\n"
     "/health - стан обладнання будинку (healthchecks.io)\n"
     "/help - ця довідка"
 )
@@ -176,6 +178,18 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "time.dur.d.one": "{n} day",
         "time.dur.d.few": "{n} days",
         "time.dur.short": "less than a minute",
+        "unit.kwh": "kWh",
+        "month.title": "📅 {month} {year}{span}",
+        "month.pv": "☀️ Solar: {v} kWh",
+        "month.home": "🏠 Consumption: {v} kWh",
+        "month.import": "🔌 From grid: {v} kWh",
+        "month.export": "↗️ To grid: {v} kWh",
+        "month.self": "🔋 Self-sufficiency: {v}",
+        "month.axis": "kWh",
+        "month.grid": "From grid",
+        "month.invalid": "Enter a month as YYYY-MM that is not in the future, e.g. /month 2026-09",
+        "month.error": "Could not get the monthly statistics. Please try again later.",
+        "month.unsupported": "Monthly statistics need SOLARMAN_BACKEND=openapi.",
     },
     "uk": {
         "status.title": "Стан інвертора",
@@ -325,8 +339,37 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "time.dur.d.one": "{n} день",
         "time.dur.d.few": "{n} дні",
         "time.dur.short": "менше хвилини",
+        "unit.kwh": "кВт·год",
+        "month.title": "📅 {month} {year}{span}",
+        "month.pv": "☀️ Сонце: {v} кВт·год",
+        "month.home": "🏠 Споживання: {v} кВт·год",
+        "month.import": "🔌 З мережі: {v} кВт·год",
+        "month.export": "↗️ У мережу: {v} кВт·год",
+        "month.self": "🔋 Самозабезпечення: {v}",
+        "month.axis": "кВт·год",
+        "month.grid": "З мережі",
+        "month.invalid": ("Вкажіть місяць як РРРР-ММ, не з майбутнього, наприклад /month 2026-09"),
+        "month.error": "Не вдалося отримати статистику за місяць. Спробуйте пізніше.",
+        "month.unsupported": "Статистика за місяць потребує SOLARMAN_BACKEND=openapi.",
     },
 }
+
+
+MONTHS: dict[Lang, tuple[str, ...]] = {
+    "en": (
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+    ),
+    "uk": (
+        "Січень", "Лютий", "Березень", "Квітень", "Травень", "Червень",
+        "Липень", "Серпень", "Вересень", "Жовтень", "Листопад", "Грудень",
+    ),
+}  # fmt: skip
+
+
+def month_name(lang: Lang, month: int) -> str:
+    """Nominative month name, e.g. (uk, 10) -> 'Жовтень'."""
+    return MONTHS[lang][month - 1]
 
 
 def t(lang: Lang, key: str, /, **kwargs: object) -> str:

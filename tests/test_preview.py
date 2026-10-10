@@ -13,7 +13,7 @@ from vydpobot import __main__ as cli
 from vydpobot import preview as preview_mod
 from vydpobot.alerts import AlertState
 from vydpobot.equipment import Check, EquipmentError, FetchResult
-from vydpobot.models import BatteryState, HistoryPoint, Snapshot
+from vydpobot.models import BatteryState, DayStats, HistoryPoint, Snapshot
 from vydpobot.quota import ApiQuota
 from vydpobot.storage import KEY_ALERT_STATE, KEY_LANGUAGE, Storage
 
@@ -54,6 +54,10 @@ class FakeSource:
         return [
             HistoryPoint(start + step * i, 50 + i * 0.1, 3000, 1000, 0, 1500) for i in range(n + 1)
         ]
+
+    async def daily_stats(self, station_id, start, end):
+        n = (end - start).days + 1
+        return [DayStats(start + timedelta(days=i), 12.0, 20.0, 6.0) for i in range(n)]
 
     async def aclose(self):
         self.closed = True
@@ -137,6 +141,7 @@ def test_all_sections_and_files(env):
         "HEALTH (/health)",
         "RUNTIME CONTEXT",
         "GRAPH",
+        "MONTH (/month)",
         "SOLARMAN API CALLS",
         "FILES",
     ):
@@ -299,3 +304,39 @@ def test_portal_token_rotated_in_preview_is_written_back(tmp_path):
         assert real.get_json(KEY_LANGUAGE) is None
     finally:
         real.close()
+
+
+def test_month_section_and_file(env):
+    code, out = env.run("--no-graph")
+    assert code == 0
+    assert "=== MONTH (/month) ===" in out
+    month_section = out.split("=== MONTH (/month) ===\n")[1].split("\n\n=== ")[0]
+    assert "Solar:" in month_section and "<b>" not in month_section
+    today = datetime.now(TZ).date()
+    path = env.out / f"month_{today.year:04d}-{today.month:02d}.png"
+    assert path.read_bytes().startswith(PNG)
+    assert str(path.resolve()) in out
+
+
+def test_no_month_flag(env):
+    code, out = env.run("--no-month")
+    assert code == 0
+    assert "=== MONTH" not in out
+    assert not list(env.out.glob("month_*.png"))
+
+
+def test_month_skipped_on_portal_backend(env):
+    env.settings.solarman_backend = "portal"
+    code, out = env.run("--no-graph")
+    assert "=== MONTH ===\nskipped: monthly statistics require the openapi backend" in out
+    assert not list(env.out.glob("month_*.png"))
+
+
+def test_month_failure_keeps_other_sections(env, monkeypatch):
+    async def boom(self, *a):
+        raise RuntimeError("month down")
+
+    monkeypatch.setattr(FakeSource, "daily_stats", boom)
+    code, out = env.run("--no-graph")
+    assert code == 0 and "=== MONTH ===\nERROR" in out and "month down" in out
+    assert "=== STATUS (/status) ===" in out

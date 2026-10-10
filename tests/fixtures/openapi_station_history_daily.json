@@ -1,0 +1,5 @@
+{"code": null, "msg": null, "success": true, "requestId": "r1", "total": 3, "stationDataItems": [
+ {"year": 2026, "month": 10, "day": 2, "generationValue": 18.4, "useValue": 25.1, "buyValue": 9.8, "gridValue": 0.5, "chargeValue": 6.2, "dischargeValue": 5.9, "fullPowerHoursDay": null, "generationCapacity": null, "irradiate": null, "generationRatio": null, "useRatio": null, "buyRatio": null, "gridRatio": null, "electricityBill": null},
+ {"year": 2026, "month": 10, "day": 1, "generationValue": 12.5, "useValue": 22.0, "buyValue": 11.3, "gridValue": null, "chargeValue": 4.0, "dischargeValue": 4.4, "fullPowerHoursDay": null},
+ {"year": 2026, "month": 10, "day": 3, "generationValue": "20.25", "useValue": null, "buyValue": null, "gridValue": null, "chargeValue": null, "dischargeValue": null}
+]}

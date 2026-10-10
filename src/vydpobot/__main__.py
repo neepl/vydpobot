@@ -51,6 +51,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     pv.add_argument("--no-graph", action="store_true", help="skip the graph (may cost API calls)")
     pv.add_argument("--no-equipment", action="store_true", help="skip healthchecks.io")
+    pv.add_argument(
+        "--no-month", action="store_true", help="skip the monthly statistics (1-2 API calls)"
+    )
     return p
 
 
@@ -144,6 +147,7 @@ def main() -> None:
                     hours=args.hours,
                     graph=not args.no_graph,
                     equipment=not args.no_equipment,
+                    month=not args.no_month,
                 )
             )
             print(report, end="")

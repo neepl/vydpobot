@@ -1,10 +1,10 @@
 """Backend-neutral data source interface and factory."""
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Protocol
 
 from vydpobot.config import Settings
-from vydpobot.models import HistoryPoint, Snapshot
+from vydpobot.models import DayStats, HistoryPoint, Snapshot
 from vydpobot.solarman.client import SolarmanClient
 from vydpobot.solarman.portal import PortalClient
 from vydpobot.storage import Storage
@@ -16,6 +16,7 @@ class DataSource(Protocol):
     async def get_history(
         self, station_id: int, start: datetime, end: datetime
     ) -> list[HistoryPoint]: ...
+    async def daily_stats(self, station_id: int, start: date, end: date) -> list[DayStats]: ...
     async def list_stations(self) -> list[dict]: ...
     async def list_devices(self, station_id: int) -> list[dict]: ...
     async def raw_debug(

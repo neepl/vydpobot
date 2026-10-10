@@ -1,7 +1,7 @@
 """Pinned live-status message: caption, /live command and per-poll refresh."""
 
 import html
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -11,6 +11,7 @@ from telegram.error import BadRequest, Forbidden, NetworkError
 from telegram_fakes import real_bot_signatures
 
 from vydpobot import bot as bot_mod
+from vydpobot.config import Settings
 from vydpobot.i18n import t
 from vydpobot.models import BatteryState, Snapshot
 from vydpobot.storage import KEY_LIVE_MESSAGES, Storage
@@ -137,6 +138,8 @@ class FakeBot:
         self.unpins: list[tuple[int, int]] = []
         self.deleted: list[tuple[int, int]] = []
         self.pin_error: Exception | None = None
+        self.delete_error: Exception | None = None
+        self.calls: list[str] = []
         self.edit_errors: dict[int, Exception] = {}
         self.next_id = 500
 
@@ -146,18 +149,24 @@ class FakeBot:
     async def send_photo(self, chat_id: int, photo: bytes, caption: str = "", **_: Any):
         assert photo.startswith(PNG)
         self.next_id += 1
+        self.calls.append("send_photo")
         self.photos.append((chat_id, caption))
         return SimpleNamespace(message_id=self.next_id)
 
     async def pin_chat_message(self, chat_id: int, message_id: int, **kw: Any) -> None:
         if self.pin_error:
             raise self.pin_error
+        self.calls.append("pin")
         self.pins.append((chat_id, message_id, kw.get("disable_notification")))
 
     async def unpin_chat_message(self, chat_id: int, message_id: int | None = None) -> None:
+        self.calls.append("unpin")
         self.unpins.append((chat_id, message_id))
 
     async def delete_message(self, chat_id: int, message_id: int) -> None:
+        self.calls.append("delete")
+        if self.delete_error:
+            raise self.delete_error
         self.deleted.append((chat_id, message_id))
 
     async def edit_message_media(self, media: Any, chat_id: int, message_id: int) -> None:
@@ -198,6 +207,7 @@ def env(tmp_path):
         solarman_device_sn=None,
         solarman_station_id=None,
         poll_interval_s=300,
+        live_reset_time="00:00",
     )
     source = FakeSource()
     bot = FakeBot()
@@ -234,6 +244,12 @@ def last_sent(env) -> str:
 
 
 def live(env):
+    """{chat: message_id} (None before anything is stored)."""
+    raw = env.storage.get_json(KEY_LIVE_MESSAGES)
+    return None if raw is None else {k: v["message_id"] for k, v in raw.items()}
+
+
+def live_raw(env):
     return env.storage.get_json(KEY_LIVE_MESSAGES)
 
 
@@ -463,3 +479,205 @@ async def test_post_init_schedules_startup_refresh(env, monkeypatch, tmp_path):
     seed(env, CHAT)
     await once[0][0](ctx(env))
     assert len(env.bot.edits) == 1
+
+
+# ------------------------------------------------------------------ daily reset
+
+KYIV_MIDNIGHT = time(0, 0)
+
+
+def utc(*a):
+    return datetime(*a, tzinfo=UTC)
+
+
+def test_reset_boundary_just_after_and_before_midnight():
+    # 00:00:01 local (21:00:01 UTC, summer EEST +3) -> today's midnight
+    after = bot_mod.reset_boundary(utc(2026, 10, 9, 21, 0, 1), TZ, KYIV_MIDNIGHT)
+    assert after == datetime(2026, 10, 10, 0, 0, tzinfo=TZ)
+    # 23:59:59 local the evening before -> the previous midnight
+    before = bot_mod.reset_boundary(utc(2026, 10, 9, 20, 59, 59), TZ, KYIV_MIDNIGHT)
+    assert before == datetime(2026, 10, 9, 0, 0, tzinfo=TZ)
+    exact = bot_mod.reset_boundary(utc(2026, 10, 9, 21, 0, 0), TZ, KYIV_MIDNIGHT)
+    assert exact == datetime(2026, 10, 10, 0, 0, tzinfo=TZ)  # <= now
+
+
+def test_reset_boundary_custom_time():
+    at = time(6, 30)
+    assert bot_mod.reset_boundary(utc(2026, 10, 10, 3, 29), TZ, at) == datetime(
+        2026, 10, 9, 6, 30, tzinfo=TZ
+    )  # 06:29 local: still yesterday's boundary
+    assert bot_mod.reset_boundary(utc(2026, 10, 10, 3, 30), TZ, at) == datetime(
+        2026, 10, 10, 6, 30, tzinfo=TZ
+    )
+
+
+def test_reset_boundary_dst_change_days():
+    # Spring forward 2026-03-29 (03:00 -> 04:00): local midnight is still EET (+2)
+    b = bot_mod.reset_boundary(utc(2026, 3, 29, 10, 0), TZ, KYIV_MIDNIGHT)
+    assert b.astimezone(UTC) == utc(2026, 3, 28, 22, 0)
+    # the day after: the boundary is EEST (+3), 21:00 UTC the evening before
+    b = bot_mod.reset_boundary(utc(2026, 3, 30, 10, 0), TZ, KYIV_MIDNIGHT)
+    assert b.astimezone(UTC) == utc(2026, 3, 29, 21, 0)
+    # 03:30 does not exist on 2026-03-29: no boundary yet at 04:10 local (01:10 UTC)
+    b = bot_mod.reset_boundary(utc(2026, 3, 29, 1, 10), TZ, time(3, 30))
+    assert b.astimezone(UTC) == utc(2026, 3, 28, 1, 30)
+    # Fall back 2026-10-25 (04:00 -> 03:00): 03:30 happens twice, the first one counts
+    b = bot_mod.reset_boundary(utc(2026, 10, 25, 12, 0), TZ, time(3, 30))
+    assert b.astimezone(UTC) == utc(2026, 10, 25, 0, 30)
+    b = bot_mod.reset_boundary(utc(2026, 10, 25, 12, 0), TZ, KYIV_MIDNIGHT)
+    assert b.astimezone(UTC) == utc(2026, 10, 24, 21, 0)
+
+
+def seed_at(env, created_at, *chats):
+    env.storage.set_json(
+        KEY_LIVE_MESSAGES,
+        {
+            str(c): {"message_id": 900 + i, "created_at": created_at.isoformat()}
+            for i, c in enumerate(chats)
+        },
+    )
+
+
+def yesterday():
+    """Created before the most recent local midnight."""
+    return datetime.now(UTC) - timedelta(days=1, hours=1)
+
+
+def test_legacy_int_values_migrate_without_reset(env):
+    env.storage.set_json(KEY_LIVE_MESSAGES, {str(CHAT): 900, "-200": 901})
+    before = datetime.now(UTC)
+    m = bot_mod._live_map(env.storage)
+    assert {k: v["message_id"] for k, v in m.items()} == {str(CHAT): 900, "-200": 901}
+    for v in m.values():
+        assert before <= datetime.fromisoformat(v["created_at"]) <= datetime.now(UTC)
+    assert live_raw(env) == m  # rewritten in the new format
+    assert bot_mod._live_map(env.storage) == m  # created_at is stable from now on
+
+
+async def test_legacy_int_does_not_trigger_reset(env):
+    env.storage.set_json(KEY_LIVE_MESSAGES, {str(CHAT): 900})
+    await bot_mod.refresh_live(env.bot, env.bd, snap())
+    assert not env.bot.photos and not env.bot.deleted
+    assert [e[:2] for e in env.bot.edits] == [(CHAT, 900)]
+
+
+async def test_refresh_after_boundary_resets(env):
+    seed_at(env, yesterday(), CHAT)
+    await bot_mod.refresh_live(env.bot, env.bd, snap())
+    assert env.bot.deleted == [(CHAT, 900)]
+    assert len(env.bot.photos) == 1 and not env.bot.edits
+    assert env.bot.pins == [(CHAT, 501, True)]
+    assert env.bot.calls == ["delete", "send_photo", "pin"]
+    raw = live_raw(env)[str(CHAT)]
+    assert raw["message_id"] == 501
+    assert datetime.now(UTC) - datetime.fromisoformat(raw["created_at"]) < timedelta(minutes=1)
+    # a second refresh edits the new message, no second reset
+    await bot_mod.refresh_live(env.bot, env.bd, snap())
+    assert len(env.bot.photos) == 1 and env.bot.edits[0][:2] == (CHAT, 501)
+
+
+async def test_refresh_before_boundary_edits(env):
+    seed_at(env, datetime.now(UTC) - timedelta(seconds=30), CHAT)
+    await bot_mod.refresh_live(env.bot, env.bd, snap())
+    assert not env.bot.photos and len(env.bot.edits) == 1
+
+
+@pytest.mark.parametrize("err", [BadRequest("message can't be deleted"), Forbidden("no")])
+async def test_delete_failure_falls_back_to_unpin(env, err):
+    seed_at(env, yesterday(), CHAT)
+    env.bot.delete_error = err
+    await bot_mod.refresh_live(env.bot, env.bd, snap())
+    assert env.bot.unpins == [(CHAT, 900)]
+    assert env.bot.calls == ["delete", "unpin", "send_photo", "pin"]
+    assert live(env) == {str(CHAT): 501}
+
+
+async def test_reset_pin_failure_is_not_fatal(env):
+    seed_at(env, yesterday(), CHAT)
+    env.bot.pin_error = Forbidden("not enough rights")
+    await bot_mod.refresh_live(env.bot, env.bd, snap())
+    assert live(env) == {str(CHAT): 501}
+
+
+async def test_daily_job_resets_all_chats(env):
+    seed_at(env, yesterday(), CHAT, -200)
+    env.storage.add_sample(snap())
+    await bot_mod.live_reset_job(ctx(env))
+    assert env.bot.deleted == [(CHAT, 900), (-200, 901)]
+    assert [p[0] for p in env.bot.photos] == [CHAT, -200]
+    assert live(env) == {str(CHAT): 501, "-200": 502}
+    assert env.source.calls == 0
+
+
+async def test_reset_disabled_never_resets(env):
+    env.bd["settings"].live_reset_time = None
+    seed_at(env, datetime.now(UTC) - timedelta(days=30), CHAT)
+    await bot_mod.refresh_live(env.bot, env.bd, snap())
+    assert not env.bot.photos and not env.bot.deleted
+    assert len(env.bot.edits) == 1
+
+
+async def test_live_command_stores_created_at(env):
+    prime(env)
+    await run_cmd(env, [])
+    raw = live_raw(env)[str(CHAT)]
+    assert set(raw) == {"message_id", "created_at"}
+    datetime.fromisoformat(raw["created_at"])
+
+
+# ------------------------------------------------------------------ pin notices
+
+BOT_ID = 4242
+
+
+async def run_pin_notice(env, from_id, chat_id=CHAT, fail=None):
+    env.bot.id = BOT_ID
+    if fail:
+        env.bot.delete_error = fail
+    update = SimpleNamespace(
+        effective_chat=SimpleNamespace(id=chat_id),
+        effective_message=SimpleNamespace(
+            message_id=777,
+            from_user=None if from_id is None else SimpleNamespace(id=from_id),
+        ),
+    )
+    await bot_mod.on_pin_notice(update, ctx(env))
+
+
+async def test_pin_notice_of_the_bot_is_deleted(env):
+    seed(env, CHAT)
+    await run_pin_notice(env, BOT_ID)
+    assert env.bot.deleted == [(CHAT, 777)]
+
+
+async def test_pin_notice_of_others_is_kept(env):
+    seed(env, CHAT)
+    await run_pin_notice(env, ADMIN)
+    await run_pin_notice(env, None)
+    assert env.bot.deleted == []
+
+
+async def test_pin_notice_outside_live_chats_is_kept(env):
+    seed(env, CHAT)
+    await run_pin_notice(env, BOT_ID, chat_id=-999)
+    assert env.bot.deleted == []
+
+
+@pytest.mark.parametrize("err", [BadRequest("no rights"), Forbidden("no"), NetworkError("x")])
+async def test_pin_notice_failures_are_ignored(env, err):
+    seed(env, CHAT)
+    await run_pin_notice(env, BOT_ID, fail=err)  # must not raise
+
+
+def test_settings_reset_time_validation():
+    base = {"telegram_token": "x", "alert_chat_id": 1, "solarman_backend": "openapi",
+            "solarman_app_id": "a", "solarman_app_secret": "b", "solarman_email": "c",
+            "solarman_password": "d", "_env_file": None}  # fmt: skip
+    assert Settings(**base).live_reset_time == "00:00"
+    assert Settings(**base, live_reset_time="6:05").live_reset_time == "06:05"
+    assert Settings(**base, live_reset_time="").live_reset_time is None
+    assert Settings(**base, monthly_report_time=" ").monthly_report_time is None
+    with pytest.raises(ValueError):
+        Settings(**base, live_reset_time="25:00")
+    with pytest.raises(ValueError):
+        Settings(**base, monthly_report_time="9am")

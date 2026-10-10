@@ -14,7 +14,11 @@ from vydpobot.models import BatteryState, HistoryPoint, Snapshot, battery_state
 KEY_ALERT_STATE = "alert_state"
 KEY_THRESHOLD = "threshold_override"
 KEY_LANGUAGE = "language_override"
-KEY_LIVE_MESSAGES = "live_messages"  # {str(chat_id): message_id} of pinned live-status messages
+# {str(chat_id): {"message_id": int, "created_at": iso}} of pinned live-status messages
+# (legacy values were a bare message_id int; bot._live_map migrates them on first read)
+KEY_LIVE_MESSAGES = "live_messages"
+KEY_MONTH_STATS = "month_stats"  # {"YYYY-MM": {"fetched_at": iso, "days": [DayStats dicts]}}
+KEY_MONTH_REPORTED = "month_reported"  # "YYYY-MM" of the last automatically posted report
 KEY_EQUIPMENT_STATE = "equipment_state"  # {check key: {status, down_since, alerted}}
 KEY_API_CALLS = "api_calls"  # {"date", "count", "notified"}: Solarman HTTP requests per local day
 KEY_API_BALANCE = "api_balance"  # {"date", "remaining", "notified"}: last daily balance check

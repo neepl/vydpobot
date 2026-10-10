@@ -1,5 +1,6 @@
 import hashlib
 import re
+from datetime import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
@@ -10,6 +11,19 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 IntList = Annotated[list[int], NoDecode]
 StrList = Annotated[list[str], NoDecode]
+
+
+_HHMM = re.compile(r"([01]?\d|2[0-3]):([0-5]\d)")
+
+
+def parse_hhmm(value: str | None) -> time | None:
+    """'09:30' -> time(9, 30); None or empty -> None. Raises ValueError on a bad value."""
+    if value is None or not value.strip():
+        return None
+    m = _HHMM.fullmatch(value.strip())
+    if m is None:
+        raise ValueError(f"{value!r} is not a valid HH:MM time")
+    return time(int(m[1]), int(m[2]))
 
 
 def _plain(v: str | SecretStr) -> str:
@@ -88,6 +102,20 @@ class Settings(BaseSettings):
     language: Literal["en", "uk"] = "en"
     timezone: str = "Europe/Kyiv"
     db_path: Path = Path("data/vydpobot.sqlite3")
+
+    # --- Scheduled jobs (HH:MM in TIMEZONE; empty = disabled) ---
+    # A fresh pinned live message every day: the old one is deleted at this time.
+    live_reset_time: str | None = "00:00"
+    # Previous month's chart and statistics, posted to ALERT_CHAT_ID on the 1st (OpenAPI only).
+    monthly_report_time: str | None = "09:00"
+
+    @field_validator("live_reset_time", "monthly_report_time", mode="before")
+    @classmethod
+    def _check_hhmm(cls, v: object) -> object:
+        if not isinstance(v, str):
+            return v
+        parsed = parse_hhmm(v)
+        return None if parsed is None else f"{parsed.hour:02d}:{parsed.minute:02d}"
 
     @field_validator("admin_user_ids", "allowed_chat_ids", mode="before")
     @classmethod

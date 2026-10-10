@@ -279,12 +279,56 @@ Commands (register with `set_my_commands` for both en and uk via `language_code`
 - `/threshold [value]` (admin to set; anyone allowed may view) -> validate 5..100, persist,
   reset alert state.
 - `/lang [en|uk]` (admin to set) -> persist.
+- `/month [YYYY-MM]` (read-only guard; default current month; rejects malformed/future args with
+  `month.invalid`) -> `upload_photo`, `build_month_report` (`monthly.load_month` + `render_month_chart`
+  + `format_month_caption`), photo with HTML caption. Errors -> `month.error` (`month.unsupported`
+  when the SolarmanError code is "unsupported", i.e. portal backend).
+Live message (see "Daily live reset"): `KEY_LIVE_MESSAGES` = `{str(chat_id): {"message_id", "created_at"}}`;
+a legacy int value is read as created "now" and rewritten (no immediate reset).
 Jobs:
 - `poll` every `poll_interval_s` (first after 10 s): get_snapshot -> add_sample ->
   evaluate_soc (only if sample is new, i.e. logger reported fresh data) -> evaluate_staleness ->
   persist state -> send events to alert_chat_id. Exceptions logged, never crash the job;
   after 3 consecutive poll failures send one `alert.stale`-like error note (reuse staleness flag).
 - `prune` daily: keep 14 days of samples.
+- `live_reset` (`run_daily` at `live_reset_time`, tz-aware; none when empty): `refresh_live`.
+- `monthly_report` (`run_daily` at `monthly_report_time`) + `monthly_startup` (once, 20 s after
+  start, respects the time of day) -> `monthly_report_once`; a failure schedules a retry in 30 min.
+
+### Daily live reset
+`reset_boundary(now, tz, reset_time)` = the most recent local occurrence of `reset_time` that is
+<= now (DST-safe: compared in UTC). `refresh_live` (under an asyncio lock in `bot_data`) first
+resets every entry with `created_at < boundary`: best-effort `delete_message` (on TelegramError
+best-effort `unpin_chat_message`), `send_photo` with the current caption/image (stored sample, no API
+call), `pin_chat_message(disable_notification=True)` (failure non-fatal), store
+`{message_id, created_at: now}`. Telegram deletes only messages < 48 h old; the daily cadence stays
+inside that. `on_pin_notice` (`MessageHandler(filters.StatusUpdate.PINNED_MESSAGE)`) deletes the
+service message when `from_user.id == bot.id` and the chat is a live chat; failures are logged at
+DEBUG only (needs the "Delete messages" right).
+
+### Monthly statistics (`monthly.py`)
+- `SolarmanClient.daily_stats(station_id, start, end) -> list[DayStats]`: `POST
+  /station/v1.0/history` `{stationId, timeType: 2, startTime, endTime}` (yyyy-MM-dd), at most 30
+  days per request (31-day month = 2 requests, days 1-30 and 31). Items carry year/month/day and
+  `generationValue` (pv), `useValue` (home), `buyValue` (grid import), `gridValue` (grid export),
+  `chargeValue`, `dischargeValue`, all kWh; other fields are null. The quota is checked before
+  every request: at 100% it raises `SolarmanError(code="budget")`. Portal: `SolarmanError(code=
+  "unsupported")`. `daily_stats` is part of the `DataSource` protocol.
+- Cache `KEY_MONTH_STATS` = `{"YYYY-MM": {"fetched_at", "days": [...]}}`. Final (never refetched):
+  fetched on a local date after the day following the month's last day. Otherwise refetched when
+  older than 1 h. At 100% budget or on failure the cached data is used; without cache the error
+  propagates.
+- `month_summary(days)`: totals (None = 0), `days_with_data`, `self_sufficiency = 1 - import/home`
+  clamped 0..1 (None if home is 0), `pv_share = pv/home` capped at 1.
+- `charts.render_month_chart(days, *, year, month, tz, lang, now=None)`: Figure only, 12x8 in at
+  100 dpi; grouped bars PV (C_PV), home (C_LOAD), grid import (C_GRID); x = day numbers 1..N;
+  title "<Month> <year>"; y axis kWh / кВт·год; legend; today hatched with alpha 0.45; no data ->
+  `chart.no_data` text.
+- Caption (HTML-escaped): `📅 Month Year[ (1–D)]`, ☀️ Solar, 🏠 Consumption, 🔌 From grid,
+  `↗️ To grid` only if > 0, 🔋 Self-sufficiency. The range only for the current month.
+- Automatic report: config `monthly_report_time` (HH:MM, default 09:00, empty = off). Only on the
+  1st of the month, posts the previous month to `alert_chat_id`; `KEY_MONTH_REPORTED` ("YYYY-MM")
+  prevents double posts; catch-up at startup on the 1st once the time has passed.
 Global error handler logs exceptions. Use `parse_mode=HTML` and escape dynamic text.
 
 ## Deployment (Agent C)
@@ -388,17 +432,19 @@ bot.py and `__main__.py` use only `make_source`/`DataSource`.
 - `vydpobot portal-probe [--out FILE]`: renew token, list stations, device list, station detail, fast/system, try
   history candidates; write scrubbed JSON (tokens removed) to stdout/FILE for the user to share.
 
-- `vydpobot preview [--out DIR] [--lang en|uk] [--hours N] [--no-graph] [--no-equipment]`: dry run of
+- `vydpobot preview [--out DIR] [--lang en|uk] [--hours N] [--no-graph] [--no-equipment] [--no-month]`: dry run of
   one bot cycle on a temporary copy of the DB (incl. -wal/-shm), no Telegram. One `poll_once`, one
   `equipment_once`; prints snapshot, /status, live caption (+length vs 1024), would-be alerts,
   /health, runtime context and Solarman calls used; writes `status_flow.png`, `live_flow.png`,
-  `graph_{hours}h.png`, `report.txt` to `--out` (default `./preview`). Step errors are printed and
+  `graph_{hours}h.png`, `month_{YYYY-MM}.png` (MONTH section; skipped on the portal backend or
+  with `--no-month`), `report.txt` to `--out` (default `./preview`). Step errors are printed and
   the rest continues; exit 0 if the Solarman poll succeeded, else 1. Code: `preview.py`.
 
 ### Quota note (OpenAPI)
 Free tier for Smart accounts: <=3 plants, <=200 000 calls/year (~548/day). Realtime every 5 min
 = 288/day; device (grid status) every 10 min = 144/day; total 432/day (~158k/year). `/status` and
-`/live` make no API calls; `/graph` uses stored samples first. See "API accounting" above.
+`/live` make no API calls; `/graph` uses stored samples first; `/month` and the monthly report cost
+1 request (2 for a 31-day month) per uncached month, ended months are cached forever. See "API accounting" above.
 
 Outage detection: when `grid_online` is not None it decides: `outage_active` = (grid_online is
 False) and the battery is discharging, with no flap guard. A grid that is off while the battery is

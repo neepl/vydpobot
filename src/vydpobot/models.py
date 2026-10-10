@@ -8,7 +8,7 @@ Sign conventions (normalized here, regardless of what Solarman returns):
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 
 
@@ -46,6 +46,19 @@ class HistoryPoint:
     load_w: float | None
     grid_w: float | None
     battery_w: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class DayStats:
+    """Energy totals of one local day, kWh (OpenAPI history with timeType 2)."""
+
+    day: date
+    pv_kwh: float | None = None  # generationValue
+    home_kwh: float | None = None  # useValue
+    grid_import_kwh: float | None = None  # buyValue
+    grid_export_kwh: float | None = None  # gridValue
+    charge_kwh: float | None = None  # chargeValue
+    discharge_kwh: float | None = None  # dischargeValue
 
 
 BATTERY_DEADBAND_W = 50.0

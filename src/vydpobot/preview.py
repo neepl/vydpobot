@@ -156,11 +156,12 @@ async def run_preview(
     hours: int = bot.DEFAULT_GRAPH_HOURS,
     graph: bool = True,
     equipment: bool = True,
+    month: bool = True,
 ) -> tuple[str, int]:
     """Run the dry run; returns (report text, exit code)."""
     out = _prepare_out(out)
     with tempfile.TemporaryDirectory(prefix="vydpobot-preview-") as tmp:
-        return await _run(settings, out, Path(tmp), lang, hours, graph, equipment)
+        return await _run(settings, out, Path(tmp), lang, hours, graph, equipment, month)
 
 
 async def _run(
@@ -171,6 +172,7 @@ async def _run(
     hours: int,
     graph: bool,
     equipment: bool,
+    month: bool,
 ) -> tuple[str, int]:
     storage = Storage(_temp_db(Path(settings.db_path), tmp))
     sections: list[tuple[str, str]] = []
@@ -331,6 +333,25 @@ async def _run(
             except Exception as e:
                 log.exception("Preview graph failed")
                 sections.append(("GRAPH", _error(e)))
+
+        # monthly statistics
+        if month:
+            if getattr(settings, "solarman_backend", "openapi") == "portal":
+                sections.append(
+                    ("MONTH", "skipped: monthly statistics require the openapi backend")
+                )
+            else:
+                try:
+                    today = now.astimezone(settings.tz).date()
+                    png, month_caption = await bot.build_month_report(
+                        bd, today.year, today.month, lang, now
+                    )
+                    path = _write(out / f"month_{today.year:04d}-{today.month:02d}.png", png)
+                    files.append(path)
+                    sections.append(("MONTH (/month)", strip_html(month_caption)))
+                except Exception as e:
+                    log.exception("Preview month failed")
+                    sections.append(("MONTH", _error(e)))
 
         # API usage
         total = _api_count(storage, settings, datetime.now(UTC))

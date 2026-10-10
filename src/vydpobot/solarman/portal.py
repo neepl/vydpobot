@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from vydpobot.config import Settings
-from vydpobot.models import HistoryPoint, Snapshot
+from vydpobot.models import DayStats, HistoryPoint, Snapshot
 from vydpobot.solarman.client import (
     ATTEMPTS,
     BACKOFF_S,
@@ -539,6 +539,9 @@ class PortalClient:
         self, station_id: int, start: datetime, end: datetime
     ) -> list[HistoryPoint]:
         raise SolarmanError("history not supported by portal backend yet")
+
+    async def daily_stats(self, station_id: int, start: date, end: date) -> list[DayStats]:
+        raise SolarmanError("monthly statistics require the openapi backend", code="unsupported")
 
     async def raw_debug(
         self, station_id: int, device_sn: str | None = None, history: bool = False

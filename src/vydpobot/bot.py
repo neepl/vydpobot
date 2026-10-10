@@ -12,8 +12,14 @@ from zoneinfo import ZoneInfo
 
 from telegram import BotCommand, InputMediaPhoto, Update
 from telegram.constants import ChatAction, ChatType, ParseMode
-from telegram.error import BadRequest, Forbidden
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.error import BadRequest, Forbidden, TelegramError
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from vydpobot.alerts import (
     AlertEvent,
@@ -21,8 +27,8 @@ from vydpobot.alerts import (
     evaluate_soc,
     evaluate_staleness,
 )
-from vydpobot.charts import render_chart, summarize
-from vydpobot.config import Settings
+from vydpobot.charts import render_chart, render_month_chart, summarize
+from vydpobot.config import Settings, parse_hhmm
 from vydpobot.equipment import (
     Check,
     EquipEvent,
@@ -45,6 +51,13 @@ from vydpobot.i18n import (
     t,
 )
 from vydpobot.models import BatteryState, HistoryPoint, Snapshot
+from vydpobot.monthly import (
+    format_month_caption,
+    load_month,
+    month_key,
+    parse_month,
+    previous_month,
+)
 from vydpobot.runtime import (
     GRID_IDLE_W,
     Runtime,
@@ -61,6 +74,7 @@ from vydpobot.storage import (
     KEY_EQUIPMENT_STATE,
     KEY_LANGUAGE,
     KEY_LIVE_MESSAGES,
+    KEY_MONTH_REPORTED,
     KEY_PORTAL_AUTH_NOTIFIED,
     KEY_THRESHOLD,
     Storage,
@@ -100,7 +114,7 @@ STATE_EMOJI = {
     BatteryState.UNKNOWN: "❔",
 }
 
-COMMANDS = ("start", "help", "status", "graph", "threshold", "lang", "live", "health")
+COMMANDS = ("start", "help", "status", "graph", "month", "threshold", "lang", "live", "health")
 
 
 # --------------------------------------------------------------------------- pure helpers
@@ -761,8 +775,56 @@ async def equipment_once(bd: dict[str, Any], now: datetime) -> EquipmentResult:
 # --------------------------------------------------------------------------- live status
 
 
-def _live_map(storage: Storage) -> dict[str, int]:
-    return dict(storage.get_json(KEY_LIVE_MESSAGES) or {})
+def _live_entry(message_id: int, created_at: datetime) -> dict[str, Any]:
+    return {"message_id": message_id, "created_at": created_at.isoformat()}
+
+
+def _created_at(entry: dict[str, Any]) -> datetime:
+    return datetime.fromisoformat(entry["created_at"])
+
+
+def _live_map(storage: Storage) -> dict[str, dict[str, Any]]:
+    """{str(chat_id): {"message_id", "created_at"}}. A legacy bare message id becomes an entry
+    created "now" and is written back, so deploying never triggers an immediate daily reset."""
+    raw = storage.get_json(KEY_LIVE_MESSAGES) or {}
+    now = datetime.now(UTC)
+    out: dict[str, dict[str, Any]] = {}
+    migrated = False
+    for key, value in raw.items():
+        if isinstance(value, dict) and isinstance(value.get("message_id"), int):
+            try:
+                datetime.fromisoformat(value["created_at"])
+                out[key] = {"message_id": value["message_id"], "created_at": value["created_at"]}
+                continue
+            except (KeyError, TypeError, ValueError):
+                pass
+            out[key] = _live_entry(value["message_id"], now)
+        elif isinstance(value, int) and not isinstance(value, bool):
+            out[key] = _live_entry(value, now)
+        else:
+            continue  # unusable value: drop it
+        migrated = True
+    if migrated or len(out) != len(raw):
+        storage.set_json(KEY_LIVE_MESSAGES, out)
+    return out
+
+
+def reset_boundary(now: datetime, tz: ZoneInfo, reset_time: time) -> datetime:
+    """The most recent local occurrence of `reset_time` that is <= now (aware, in `tz`)."""
+    local = now.astimezone(tz)
+    day = local.date()
+    for _ in range(3):  # one step back is enough; the loop guards odd DST gaps
+        boundary = datetime.combine(day, reset_time, tzinfo=tz).astimezone(UTC)
+        if boundary <= now:
+            return boundary.astimezone(tz)
+        day -= timedelta(days=1)
+    raise AssertionError("unreachable")
+
+
+def _live_boundary(settings: Any, now: datetime) -> datetime | None:
+    """Daily reset boundary, or None when LIVE_RESET_TIME is empty."""
+    at = parse_hhmm(getattr(settings, "live_reset_time", None))
+    return None if at is None else reset_boundary(now, settings.tz, at)
 
 
 async def _pin(bot: Any, chat_id: int, message_id: int) -> bool:
@@ -813,10 +875,36 @@ def _live_caption(
     )
 
 
+async def _reset_live(bot: Any, chat_id: int, old_id: int, png: bytes, caption: str) -> int:
+    """Replace the live message by a fresh pinned one; returns the new message id.
+
+    The old message is deleted (Telegram only allows that for messages younger than 48 h); if
+    that fails it is at least unpinned. The new message is sent even if both fail.
+    """
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=old_id)
+    except TelegramError as e:
+        log.info("Cannot delete old live message in chat %s: %s", chat_id, e)
+        try:
+            await bot.unpin_chat_message(chat_id=chat_id, message_id=old_id)
+        except TelegramError as e2:
+            log.info("Cannot unpin old live message in chat %s: %s", chat_id, e2)
+    message_id, _ = await _send_live(bot, chat_id, png, caption)
+    return message_id
+
+
 async def refresh_live(
     bot: Any, bd: dict[str, Any], snap: Snapshot | None, only_chat: int | None = None
 ) -> None:
-    """Edit the live message(s) with `snap`. Never raises; never calls the data source."""
+    """Edit the live message(s) with `snap`, first replacing those older than the daily reset
+    boundary. Never raises; never calls the data source."""
+    async with bd.setdefault("live_lock", asyncio.Lock()):
+        await _refresh_live(bot, bd, snap, only_chat)
+
+
+async def _refresh_live(
+    bot: Any, bd: dict[str, Any], snap: Snapshot | None, only_chat: int | None
+) -> None:
     try:
         storage: Storage = bd["storage"]
         live = _live_map(storage)
@@ -829,6 +917,7 @@ async def refresh_live(
             return
         settings: Settings = bd["settings"]
         lang, now = get_lang(bd), datetime.now(UTC)
+        boundary = _live_boundary(settings, now)
         grid_off, runtime = runtime_context(bd, snap, now)
         caption = _live_caption(bd, snap, lang, now, runtime, grid_off)
         png = await asyncio.to_thread(
@@ -845,11 +934,15 @@ async def refresh_live(
     except Exception:
         log.exception("Live refresh preparation failed")
         return
-    updates: dict[str, int] = {}
+    updates: dict[str, dict[str, Any]] = {}
     dropped: set[str] = set()
-    for key, message_id in live.items():
-        chat_id = int(key)
+    for key, entry in live.items():
+        chat_id, message_id = int(key), entry["message_id"]
         try:
+            if boundary is not None and _created_at(entry) < boundary:
+                new_id = await _reset_live(bot, chat_id, message_id, png, caption)
+                updates[key] = _live_entry(new_id, now)
+                continue
             media = InputMediaPhoto(png, caption=caption, parse_mode=ParseMode.HTML)
             await bot.edit_message_media(media=media, chat_id=chat_id, message_id=message_id)
         except BadRequest as e:
@@ -859,7 +952,8 @@ async def refresh_live(
                 log.warning("Live refresh failed in chat %s: %s", chat_id, e)
                 continue
             try:
-                updates[key], _ = await _send_live(bot, chat_id, png, caption)
+                new_id, _ = await _send_live(bot, chat_id, png, caption)
+                updates[key] = _live_entry(new_id, now)
             except Exception:
                 log.exception("Live re-send failed in chat %s", chat_id)
         except Forbidden as e:
@@ -1138,7 +1232,7 @@ async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if key not in live:
             await say("live.not_active")
         else:
-            message_id = live.pop(key)
+            message_id = live.pop(key)["message_id"]
             with suppress(Exception):
                 await bot.unpin_chat_message(chat_id=chat.id, message_id=message_id)
             with suppress(Exception):
@@ -1173,12 +1267,73 @@ async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 log.exception("Live message creation failed")
                 await say("bot.error")
             else:
-                live[key] = message_id
+                live[key] = _live_entry(message_id, now)
                 storage.set_json(KEY_LIVE_MESSAGES, live)
                 await say("live.started" if pinned else "live.no_pin_rights")
     if message is not None:
         with suppress(Exception):  # best effort; may lack delete rights
             await message.delete()
+
+
+async def on_pin_notice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Delete the "bot pinned a photo" service message the bot's own pin leaves in live chats.
+
+    Needs the "Delete messages" admin right; any failure is ignored.
+    """
+    message, chat = update.effective_message, update.effective_chat
+    if message is None or chat is None or message.from_user is None:
+        return
+    if message.from_user.id != context.bot.id:
+        return
+    bd = context.application.bot_data
+    try:
+        if str(chat.id) not in _live_map(bd["storage"]):
+            return
+        await context.bot.delete_message(chat_id=chat.id, message_id=message.message_id)
+    except Exception as e:
+        log.debug("Cannot delete pin notice in chat %s: %s", chat.id, e)
+
+
+async def build_month_report(
+    bd: dict[str, Any], year: int, month: int, lang: Lang, now: datetime
+) -> tuple[bytes, str]:
+    """(chart PNG, HTML caption) of a month. Raises SolarmanError / other errors on failure."""
+    settings: Settings = bd["settings"]
+    station_id = await get_station_id(bd)
+    days = await load_month(bd["storage"], bd["source"], station_id, year, month, settings.tz, now)
+    png = await asyncio.to_thread(
+        render_month_chart, days, year=year, month=month, tz=settings.tz, lang=lang, now=now
+    )
+    today = now.astimezone(settings.tz).date()
+    return png, format_month_caption(days, year, month, lang, today)
+
+
+async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    bd = context.application.bot_data
+    if not await _guard(update, bd):
+        return
+    lang, settings = get_lang(bd), bd["settings"]
+    now = datetime.now(UTC)
+    today = now.astimezone(settings.tz).date()
+    year, month = today.year, today.month
+    if context.args:
+        parsed = parse_month(context.args[0], today)
+        if parsed is None:
+            await _reply(update, html.escape(t(lang, "month.invalid")))
+            return
+        year, month = parsed
+    assert update.effective_chat and update.effective_message
+    await update.effective_chat.send_action(ChatAction.UPLOAD_PHOTO)
+    try:
+        png, caption = await build_month_report(bd, year, month, lang, now)
+    except Exception as e:
+        log.warning("/month failed: %s: %s", type(e).__name__, e)
+        unsupported = getattr(e, "code", None) == "unsupported"
+        await _reply(
+            update, html.escape(t(lang, "month.unsupported" if unsupported else "month.error"))
+        )
+        return
+    await update.effective_message.reply_photo(png, caption=caption, parse_mode=ParseMode.HTML)
 
 
 async def cmd_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1284,6 +1439,62 @@ async def _startup_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
     await refresh_live(context.bot, bd, latest_snapshot(bd))
 
 
+async def live_reset_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Daily at LIVE_RESET_TIME: refresh_live replaces live messages older than the boundary."""
+    bd = context.application.bot_data
+    await refresh_live(context.bot, bd, latest_snapshot(bd))
+
+
+async def monthly_report_once(
+    bot: Any, bd: dict[str, Any], now: datetime, *, respect_time: bool = False
+) -> bool:
+    """Post the previous month's report to the alert chat, on the 1st only and at most once.
+
+    With respect_time (startup catch-up) nothing is posted before MONTHLY_REPORT_TIME.
+    Returns True if a report was posted.
+    """
+    settings: Settings = bd["settings"]
+    at = parse_hhmm(getattr(settings, "monthly_report_time", None))
+    if at is None:
+        return False
+    local = now.astimezone(settings.tz)
+    if local.day != 1 or (respect_time and local.time() < at):
+        return False
+    year, month = previous_month(local.date())
+    storage: Storage = bd["storage"]
+    if storage.get_json(KEY_MONTH_REPORTED) == month_key(year, month):
+        return False
+    png, caption = await build_month_report(bd, year, month, get_lang(bd), now)
+    await bot.send_photo(
+        chat_id=settings.alert_chat_id, photo=png, caption=caption, parse_mode=ParseMode.HTML
+    )
+    storage.set_json(KEY_MONTH_REPORTED, month_key(year, month))
+    return True
+
+
+MONTHLY_RETRY_S = 1800
+
+
+async def _monthly(context: ContextTypes.DEFAULT_TYPE, *, respect_time: bool) -> None:
+    bd = context.application.bot_data
+    try:
+        await monthly_report_once(context.bot, bd, datetime.now(UTC), respect_time=respect_time)
+    except Exception:
+        log.exception("Monthly report failed; retrying in %d s", MONTHLY_RETRY_S)
+        jq = getattr(context, "job_queue", None)
+        if jq is not None:
+            jq.run_once(monthly_startup_job, when=MONTHLY_RETRY_S, name="monthly_retry")
+
+
+async def monthly_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _monthly(context, respect_time=False)
+
+
+async def monthly_startup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Catch-up after downtime: on the 1st, once MONTHLY_REPORT_TIME has passed."""
+    await _monthly(context, respect_time=True)
+
+
 async def prune_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         cutoff = datetime.now(UTC) - timedelta(days=RETENTION_DAYS)
@@ -1307,6 +1518,7 @@ def _commands(lang: Lang) -> list[BotCommand]:
             "help": "Show help",
             "status": "Current inverter status",
             "graph": "Power and SOC chart [hours]",
+            "month": "Monthly chart and statistics [YYYY-MM]",
             "threshold": "View or set the SOC alert threshold",
             "lang": "View or set the language",
             "live": "Pinned live status (admin): /live, /live off",
@@ -1317,6 +1529,7 @@ def _commands(lang: Lang) -> list[BotCommand]:
             "help": "Показати довідку",
             "status": "Поточний стан інвертора",
             "graph": "Графік потужності та заряду [годин]",
+            "month": "Графік і статистика за місяць [РРРР-ММ]",
             "threshold": "Переглянути або змінити поріг сповіщень",
             "lang": "Переглянути або змінити мову",
             "live": "Закріплений живий стан (адмін): /live, /live off",
@@ -1361,6 +1574,15 @@ async def _post_init(app: Application) -> None:
         app.job_queue.run_daily(balance_job, time(0, 10, tzinfo=settings.tz), name="balance")
         app.job_queue.run_once(balance_job, when=60, name="balance_startup")
     app.job_queue.run_once(_startup_refresh, when=3, name="live_startup")
+    if (reset_at := parse_hhmm(getattr(settings, "live_reset_time", None))) is not None:
+        app.job_queue.run_daily(
+            live_reset_job, reset_at.replace(tzinfo=settings.tz), name="live_reset"
+        )
+    if (report_at := parse_hhmm(getattr(settings, "monthly_report_time", None))) is not None:
+        app.job_queue.run_daily(
+            monthly_report_job, report_at.replace(tzinfo=settings.tz), name="monthly_report"
+        )
+        app.job_queue.run_once(monthly_startup_job, when=20, name="monthly_startup")
     app.job_queue.run_repeating(prune_job, interval=timedelta(days=1), first=60, name="prune")
 
 
@@ -1387,6 +1609,7 @@ def run(settings: Settings) -> None:
         ("help", cmd_help),
         ("status", cmd_status),
         ("graph", cmd_graph),
+        ("month", cmd_month),
         ("threshold", cmd_threshold),
         ("lang", cmd_lang),
         ("live", cmd_live),
@@ -1394,5 +1617,6 @@ def run(settings: Settings) -> None:
         ("token", cmd_token),  # hidden: not in COMMANDS / set_my_commands
     ):
         app.add_handler(CommandHandler(name, fn))
+    app.add_handler(MessageHandler(filters.StatusUpdate.PINNED_MESSAGE, on_pin_notice))
     app.add_error_handler(on_error)
     app.run_polling()
