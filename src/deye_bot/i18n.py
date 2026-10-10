@@ -75,6 +75,8 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "flow.state_idle": "idle",
         "flow.updated": "{time} · {ago}",
         "flow.stale": "Outdated data: {time} · {ago}",
+        "flow.checked": "{time} · checked {check}",
+        "flow.stale_checked": "No new data since {time} · checked {check}",
         "bot.help": _HELP_EN,
         "bot.not_allowed": "Sorry, you are not allowed to use this bot.",
         "bot.admin_only": "This command is for administrators only.",
@@ -115,7 +117,8 @@ MESSAGES: dict[Lang, dict[str, str]] = {
             'administrator with only the "Pin messages" right. Until then the message '
             "is updated without being pinned."
         ),
-        "live.updated": "Updated {datetime} ({ago})",
+        "live.updated": "Data: {data_time} · checked {check_time}",
+        "live.stale": "⚠️ No new data since {time}",
         "unit.w": "W",
         "unit.kw": "kW",
         "time.ago.min": "{n} minutes ago",
@@ -174,6 +177,8 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "flow.state_idle": "очікування",
         "flow.updated": "{time} · {ago}",
         "flow.stale": "Дані застаріли: {time} · {ago}",
+        "flow.checked": "{time} · перевірено {check}",
+        "flow.stale_checked": "Немає нових даних з {time} · перевірено {check}",
         "bot.help": _HELP_UK,
         "bot.not_allowed": "Вибачте, у вас немає доступу до цього бота.",
         "bot.admin_only": "Ця команда доступна лише адміністраторам.",
@@ -217,7 +222,8 @@ MESSAGES: dict[Lang, dict[str, str]] = {
             "зробіть бота адміністратором групи лише з правом «Закріплювати повідомлення». "
             "Доти повідомлення оновлюватиметься без закріплення."
         ),
-        "live.updated": "Оновлено {datetime} ({ago})",
+        "live.updated": "Дані: {data_time} · перевірено {check_time}",
+        "live.stale": "⚠️ Немає нових даних з {time}",
         "unit.w": "Вт",
         "unit.kw": "кВт",
         "time.ago.min": "{n} хвилин тому",

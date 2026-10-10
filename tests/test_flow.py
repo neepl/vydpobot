@@ -220,3 +220,41 @@ def _assert_text_clear(s: Snapshot, lang: Lang) -> None:
 )
 def test_text_clears_lines(s: Snapshot, lang: Lang) -> None:
     _assert_text_clear(s, lang)
+
+
+def _footer_text(s: Snapshot, lang: Lang, checked_at) -> str:
+    from deye_bot.flow import build_flow_figure
+
+    fig, ax = build_flow_figure(s, lang=lang, tz=TZ, now=NOW, checked_at=checked_at)
+    renderer = FigureCanvasAgg(fig).get_renderer()
+    text = min(ax.texts, key=lambda tx: tx.get_position()[1])
+    (x0, y0), (x1, y1) = ax.transData.inverted().transform(
+        text.get_window_extent(renderer).get_points()
+    )
+    assert x0 >= 0 and x1 <= 10 and y0 >= 0 and y1 <= 8
+    return text.get_text()
+
+
+@pytest.mark.parametrize("lang", ["en", "uk"])
+@pytest.mark.parametrize("age", [2, 180, 3000])
+def test_checked_footer_fits_and_png(lang: Lang, age: int) -> None:
+    from deye_bot.flow import render_flow
+
+    s = snap(60, 100, 300, 0, 0, age_min=age)
+    checked = NOW
+    text = _footer_text(s, lang, checked)
+    assert "ago" not in text and "тому" not in text
+    assert "15:00" in text  # check time, 12:00 UTC in Kyiv
+    assert render_flow(s, lang=lang, tz=TZ, now=NOW, checked_at=checked).startswith(PNG)
+
+
+def test_checked_footer_texts() -> None:
+    assert _footer_text(snap(60, 1, 1, 0, 0), "en", NOW) == "14:58 · checked 15:00"
+    assert _footer_text(snap(60, 1, 1, 0, 0), "uk", NOW) == "14:58 · перевірено 15:00"
+    old = snap(60, 1, 1, 0, 0, age_min=180)
+    assert _footer_text(old, "en", NOW) == "No new data since 12:00 · checked 15:00"
+    assert _footer_text(old, "uk", NOW) == "Немає нових даних з 12:00 · перевірено 15:00"
+
+
+def test_footer_without_checked_at_unchanged() -> None:
+    assert _footer_text(snap(60, 1, 1, 0, 0), "en", None) == "14:58 · 2 minutes ago"

@@ -301,13 +301,24 @@ def _draw_node(
         text(0.85, label, 12, INK_MUTED)
 
 
-def _footer(snap: Snapshot, lang: Lang, tz: ZoneInfo, now: datetime, stale_after_min: int):
+def _footer(
+    snap: Snapshot,
+    lang: Lang,
+    tz: ZoneInfo,
+    now: datetime,
+    stale_after_min: int,
+    checked_at: datetime | None = None,
+):
     local = snap.ts.astimezone(tz)
     fmt = "%H:%M" if local.date() == now.astimezone(tz).date() else "%d.%m %H:%M"
     age = (now - snap.ts).total_seconds()
-    key = "flow.stale" if age > stale_after_min * 60 else "flow.updated"
-    text = t(lang, key, time=local.strftime(fmt), ago=fmt_ago(lang, age))
-    return text, key == "flow.stale"
+    stale = age > stale_after_min * 60
+    if checked_at is not None:
+        key = "flow.stale_checked" if stale else "flow.checked"
+        check = checked_at.astimezone(tz).strftime("%H:%M")
+        return t(lang, key, time=local.strftime(fmt), check=check), stale
+    key = "flow.stale" if stale else "flow.updated"
+    return t(lang, key, time=local.strftime(fmt), ago=fmt_ago(lang, age)), stale
 
 
 def build_flow_figure(
@@ -317,6 +328,7 @@ def build_flow_figure(
     tz: ZoneInfo,
     now: datetime | None = None,
     stale_after_min: int = 30,
+    checked_at: datetime | None = None,
 ) -> tuple[Figure, Axes]:
     now = now or datetime.now(tz)
     watts: dict[Node, float | None] = {
@@ -338,7 +350,7 @@ def build_flow_figure(
         _draw_connection(ax, node, w, peak, d)
         _draw_node(ax, renderer, node, snapshot, lang, w, d)
     _draw_hub(ax)
-    text, stale = _footer(snapshot, lang, tz, now, stale_after_min)
+    text, stale = _footer(snapshot, lang, tz, now, stale_after_min, checked_at)
     ax.text(
         W / 2,
         0.22,
@@ -358,8 +370,16 @@ def render_flow(
     tz: ZoneInfo,
     now: datetime | None = None,
     stale_after_min: int = 30,
+    checked_at: datetime | None = None,
 ) -> bytes:
-    fig, _ = build_flow_figure(snapshot, lang=lang, tz=tz, now=now, stale_after_min=stale_after_min)
+    fig, _ = build_flow_figure(
+        snapshot,
+        lang=lang,
+        tz=tz,
+        now=now,
+        stale_after_min=stale_after_min,
+        checked_at=checked_at,
+    )
     buf = io.BytesIO()
     fig.savefig(buf, format="png")
     return buf.getvalue()

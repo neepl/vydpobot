@@ -77,22 +77,43 @@ def test_stale_prefix_and_footer():
     s = snap(ts=NOW - timedelta(hours=2))
     text = caption(s)
     assert text.startswith("⚠️ 🔋")
-    assert text.splitlines()[-1].startswith("⚠️ ")
-    assert "Updated 10.10.2026 10:40 (2 hours ago)" in text
+    assert text.splitlines()[-1] == "⚠️ No new data since 10:40"
+    assert "Data: 10.10.2026 10:40 · checked 12:40" in text
     assert not caption(snap()).startswith("⚠️")
 
 
+def test_stale_line_has_date_when_not_today():
+    text = caption(snap(ts=NOW - timedelta(days=1)), "uk")
+    assert text.splitlines()[-1] == "⚠️ Немає нових даних з 09.10 12:40"
+
+
 @pytest.mark.parametrize("lang", ["en", "uk"])
-def test_caption_length_and_footer(lang):
-    text = caption(snap(ts=NOW - timedelta(hours=5)), lang)
+@pytest.mark.parametrize("stale", [False, True])
+def test_caption_absolute_times_no_ago(lang, stale):
+    s = snap(ts=NOW - timedelta(hours=5 if stale else 0, minutes=5))
+    text = caption(s, lang)
     assert len(text) < 1024
-    assert t(lang, "live.updated", datetime="10.10.2026 07:35", ago="5").split("{")[0][:4] in text
+    assert "ago" not in text and "тому" not in text
+    expected = t(
+        lang,
+        "live.updated",
+        data_time=s.ts.astimezone(TZ).strftime("%d.%m.%Y %H:%M"),
+        check_time="12:40",
+    )
+    lines = text.splitlines()
+    assert (lines[-2] if stale else lines[-1]) == expected
+    if stale:
+        assert lines[-1].startswith("⚠️ ")
 
 
-def test_caption_body_has_no_status_updated_line():
-    text = caption(snap())
-    assert "Updated 10.10.2026 12:35 (5 minutes ago)" in text
-    assert text.count("Updated") == 1
+def test_caption_samples():
+    assert caption(snap()).splitlines()[-1] == "Data: 10.10.2026 12:35 · checked 12:40"
+    assert caption(snap(), "uk").splitlines()[-1] == "Дані: 10.10.2026 12:35 · перевірено 12:40"
+
+
+def test_status_keeps_relative_ago():
+    text = bot_mod.format_status(snap(), "en", TZ, NOW)
+    assert "5 minutes ago" in text
 
 
 # ------------------------------------------------------------------ fakes
@@ -375,3 +396,46 @@ async def test_fake_bot_rejects_calls_the_real_bot_would_reject():
     with pytest.raises(TypeError):
         await fake.edit_message_media(CHAT, 1, media=media)
     await fake.edit_message_media(media=media, chat_id=CHAT, message_id=1)
+
+
+async def test_live_passes_checked_at(env, monkeypatch):
+    seen = []
+    real = bot_mod.render_flow
+
+    def spy(*a, **kw):
+        seen.append(kw.get("checked_at"))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(bot_mod, "render_flow", spy)
+    await run_cmd(env, [])
+    seed(env, CHAT)
+    await bot_mod.refresh_live(env.bot, env.bd, snap())
+    assert len(seen) == 2 and all(x is not None for x in seen)
+
+
+async def test_post_init_schedules_startup_refresh(env, monkeypatch, tmp_path):
+    env.bd["settings"].db_path = tmp_path / "p.db"
+    monkeypatch.setattr(bot_mod, "make_source", lambda *a, **k: object())
+    monkeypatch.setattr(bot_mod, "quota_warning", lambda s: None)
+    once, repeating = [], []
+
+    class JQ:
+        def run_once(self, cb, when, **kw):
+            once.append((cb, when))
+
+        def run_repeating(self, cb, **kw):
+            repeating.append(cb)
+
+    class B:
+        async def set_my_commands(self, *a, **k):
+            pass
+
+    app = SimpleNamespace(bot_data={"settings": env.bd["settings"]}, bot=B(), job_queue=JQ())
+    await bot_mod._post_init(app)
+    assert len(once) == 1 and once[0][1] <= 5
+    app.bot_data["storage"].close()
+    # the scheduled job refreshes from the latest stored sample
+    env.storage.add_sample(snap())
+    seed(env, CHAT)
+    await once[0][0](ctx(env))
+    assert len(env.bot.edits) == 1

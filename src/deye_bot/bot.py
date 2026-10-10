@@ -207,9 +207,10 @@ def format_live_caption(
     when = s.ts.astimezone(tz).strftime("%d.%m.%Y %H:%M")
     lines = [format_live_summary(s, lang, tz, now, stale), ""]
     lines += _status_lines(s, lang, threshold)
-    lines += ["", html.escape(t(lang, "live.updated", datetime=when, ago=fmt_ago(lang, age)))]
+    check = now.astimezone(tz).strftime("%H:%M")
+    lines += ["", html.escape(t(lang, "live.updated", data_time=when, check_time=check))]
     if stale:
-        lines.append(_stale_line(lang, age))
+        lines.append(html.escape(t(lang, "live.stale", time=_local(s.ts, tz, now))))
     return "\n".join(lines)
 
 
@@ -411,6 +412,7 @@ async def refresh_live(
             tz=settings.tz,
             now=now,
             stale_after_min=settings.stale_after_min,
+            checked_at=now,
         )
     except Exception:
         log.exception("Live refresh preparation failed")
@@ -683,6 +685,7 @@ async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     tz=settings.tz,
                     now=now,
                     stale_after_min=settings.stale_after_min,
+                    checked_at=now,
                 )
                 message_id, pinned = await _send_live(bot, chat.id, png, caption)
             except Exception:
@@ -765,6 +768,12 @@ async def poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.exception("Live refresh failed")
 
 
+async def _startup_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """One-off refresh of the live message(s) shortly after a restart."""
+    bd = context.application.bot_data
+    await refresh_live(context.bot, bd, bd["storage"].latest_sample())
+
+
 async def prune_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         cutoff = datetime.now(UTC) - timedelta(days=RETENTION_DAYS)
@@ -815,6 +824,7 @@ async def _post_init(app: Application) -> None:
     await app.bot.set_my_commands(_commands("uk"), language_code="uk")
     assert app.job_queue is not None
     app.job_queue.run_repeating(poll_job, interval=settings.poll_interval_s, first=10, name="poll")
+    app.job_queue.run_once(_startup_refresh, when=3, name="live_startup")
     app.job_queue.run_repeating(prune_job, interval=timedelta(days=1), first=60, name="prune")
 
 
