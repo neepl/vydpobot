@@ -581,7 +581,8 @@ def all_status_result():
 
 def test_section_en_all_statuses_in_env_order():
     assert sect(all_status_result()).splitlines() == [
-        "🩺 Equipment",
+        "🩺 <b>Equipment</b>",
+        "",
         "🟢 Internet",
         "🟡 Cams",
         "🔴 Lift — down since 12:35",
@@ -594,8 +595,9 @@ def test_section_en_all_statuses_in_env_order():
 
 def test_section_uk():
     lines = sect(all_status_result(), "uk").splitlines()
-    assert lines[0] == "🩺 Обладнання"
-    assert lines[3] == "🔴 Lift — немає сигналу з 12:35"
+    assert lines[0] == "🩺 <b>Обладнання</b>"
+    assert lines[1] == ""
+    assert lines[4] == "🔴 Lift — немає сигналу з 12:35"
     assert lines[-1] == "❓ ghost — не знайдено"
 
 
@@ -609,7 +611,7 @@ def test_section_down_time_date_prefix_and_null():
 def test_section_escapes_names():
     text = sect(result(chk("<b>&", "down"), extra=["<x>"]))
     assert "🔴 &lt;b&gt;&amp; — down" in text and "❓ &lt;x&gt; — not found" in text
-    assert "<b>" not in text
+    assert "&lt;b&gt;" in text and "<b>&" not in text  # only the title is real markup
 
 
 def test_section_none_when_empty():
@@ -620,8 +622,8 @@ def test_caption_has_section_before_data_line_and_no_summary():
     text = cap(result(chk("A", "up"), chk("B", "down")))
     lines = text.splitlines()
     assert lines[-1].startswith("Data:")
-    assert "🩺 Equipment\n🟢 A\n🔴 B — down since —\n\nData:" in text
-    assert "\n\n🩺 Equipment" in text
+    assert "🩺 <b>Equipment</b>\n\n🟢 A\n🔴 B — down since —\n\nData:" in text
+    assert "\n\n🩺 <b>Equipment</b>" in text
     assert "OK ·" not in text and "1/2" not in text
 
 
@@ -652,9 +654,10 @@ def test_budget_down_first_then_env_order_and_count():
     text = sect(res, budget=300)
     assert len(text) <= 300
     lines = text.splitlines()
-    assert lines[1].startswith("🔴 LIFT") and lines[2].startswith("🔴 PUMP")
-    assert lines[3].startswith("🟢 up00") and lines[4].startswith("🟢 up01")
-    shown = len(lines) - 2
+    assert lines[1] == ""
+    assert lines[2].startswith("🔴 LIFT") and lines[3].startswith("🔴 PUMP")
+    assert lines[4].startswith("🟢 up00") and lines[5].startswith("🟢 up01")
+    shown = len(lines) - 3  # minus title, blank line, "… +N"
     assert lines[-1] == f"… +{22 - shown}"
     assert sect(res, "uk", budget=300).splitlines()[-1].startswith("… ще ")
 
@@ -696,7 +699,7 @@ async def test_refresh_live_uses_cache_only_when_enabled(env, monkeypatch):
     assert "🩺" not in seen[-1]
     env.bd["equipment"] = FakeMonitor()
     await bot_mod.refresh_live(B(), env.bd, snap())
-    assert "🩺 Equipment\n🔴 A — down since —" in seen[-1]
+    assert "🩺 <b>Equipment</b>\n\n🔴 A — down since —" in seen[-1]
 
 
 # ------------------------------------------------------------------ _post_init scheduling
