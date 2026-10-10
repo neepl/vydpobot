@@ -437,8 +437,8 @@ def test_flow_text_clear_with_runtime(lang, rt):
     assert any(("grid off" if lang == "en" else "немає мережі") == x for x in texts)
     if rt is not None:
         joined = " ".join(texts)
-        eta = "≈ 5 h 20 min · until" if lang == "en" else "≈ 5 год 20 хв · до"
-        assert eta in joined
+        main, until = ("≈ 5 h 20 min", "until") if lang == "en" else ("≈ 5 год 20 хв", "до")
+        assert main in texts and until in joined
         assert ("03:10" if rt is not RT else "23:40") in joined
     segs = [
         seg for node in CORNERS for seg in zip(node_path(node), node_path(node)[1:], strict=False)
@@ -452,7 +452,9 @@ def test_flow_text_clear_with_runtime(lang, rt):
 
 
 @pytest.mark.parametrize("lang", ["en", "uk"])
-def test_flow_banner_texts(lang):
+def test_flow_eta_block_next_to_battery(lang):
+    from vydpobot.flow import ETA_MAIN_Y, ETA_UNTIL_Y
+
     s = snap(ts=NOW - timedelta(minutes=2))
     state = "discharging" if lang == "en" else "розряджається"
     dur, until, over = (
@@ -460,20 +462,23 @@ def test_flow_banner_texts(lang):
     )
     far = replace(RT, ends_at=NOW + timedelta(hours=25))
     capd = Runtime(72.0, NOW + timedelta(hours=72), 0.1, "current", capped=True)
-    for rt, want in [
-        (RT, f"≈ {dur} · {until} 23:40"),
-        (replace(RT, ends_at=END + timedelta(hours=3, minutes=30)), f"≈ {dur} · {until} 03:10"),
-        (far, f"≈ {dur} · {until} 11.10 20:00"),
-        (capd, over),
+    for rt, main, sub in [
+        (RT, f"≈ {dur}", f"{until} 23:40"),
+        (replace(RT, ends_at=END + timedelta(hours=3, minutes=30)), f"≈ {dur}", f"{until} 03:10"),
+        (far, f"≈ {dur}", f"{until} 11.10 20:00"),
+        (capd, over, None),
     ]:
         fig, ax = build_flow_figure(s, lang=lang, tz=TZ, now=NOW, runtime=rt, grid_off=True)
-        texts = [x.get_text() for x in ax.texts]
-        assert want in texts, (want, texts)
-        assert state in texts  # battery sub-line is one plain line again
-        banner = next(x for x in ax.texts if x.get_text() == want)
-        assert banner.get_fontsize() >= 12 and banner.get_fontweight() == "bold"
+        by_text = {x.get_text(): x for x in ax.texts}
+        assert state in by_text  # battery sub-line stays one plain line
+        m = by_text[main]
+        assert m.get_fontweight() == "bold" and m.get_fontsize() >= 11
+        x, y = m.get_position()
+        assert y == ETA_MAIN_Y and x < 1  # left column, above the battery value
+        if sub:
+            assert by_text[sub].get_position()[1] == ETA_UNTIL_Y
     _, ax = build_flow_figure(s, lang=lang, tz=TZ, now=NOW, grid_off=True)
-    assert not any("≈ 5" in x.get_text() for x in ax.texts)
+    assert not any(x.get_text().startswith("≈ ") for x in ax.texts)
 
 
 @pytest.mark.parametrize("lang", ["en", "uk"])

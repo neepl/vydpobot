@@ -271,37 +271,44 @@ def _node_texts(
     return label, value, sub
 
 
-BANNER_Y = 7.2
-BANNER_ROOM = 6.4  # data units, centred on the hub: clears the corner labels and icons
-BANNER_SIZE, BANNER_MIN = 16.0, 12.0
+# Outage ETA block: left column, just above the battery value (the area between the solar
+# and battery corners is otherwise empty).
+ETA_MAIN_Y, ETA_UNTIL_Y = 4.15, 3.65
+ETA_SIZE, ETA_UNTIL_SIZE, ETA_MIN = 16.0, 12.0, 11.0
 
 
-def banner_text(runtime: Runtime, lang: Lang, tz: ZoneInfo, now: datetime) -> str:
+def eta_lines(runtime: Runtime, lang: Lang, tz: ZoneInfo, now: datetime) -> tuple[str, str | None]:
+    """('≈ 7 год 40 хв', 'до 03:40'), or ('> 72 год', None) when capped."""
     if runtime.capped:
-        return t(lang, "flow.eta_capped")
-    dur = fmt_hm(lang, runtime.hours)
-    return t(lang, "flow.eta", dur=dur, when=fmt_until(runtime.ends_at, tz, now))
+        return t(lang, "flow.eta_capped"), None
+    until = t(lang, "flow.eta_until", when=fmt_until(runtime.ends_at, tz, now))
+    return f"≈ {fmt_hm(lang, runtime.hours)}", until
 
 
-def _draw_banner(ax: Axes, renderer: RendererBase, text: str) -> None:
-    t_ = ax.text(
-        HUB[0],
-        BANNER_Y,
-        text,
-        ha="center",
-        va="center",
-        fontsize=BANNER_SIZE,
-        color=INK,
-        fontweight="bold",
-        zorder=6,
-    )
-    while t_.get_fontsize() > BANNER_MIN:
-        (x0, _), (x1, _) = ax.transData.inverted().transform(
-            t_.get_window_extent(renderer).get_points()
+def _draw_eta(ax: Axes, renderer: RendererBase, main: str, until: str | None) -> None:
+    room = HUB[0] - ELBOW_DX - TEXT_GAP - EDGE  # left edge up to the battery's vertical run
+    rows = [(ETA_MAIN_Y, main, ETA_SIZE, INK, "bold")]
+    if until:
+        rows.append((ETA_UNTIL_Y, until, ETA_UNTIL_SIZE, INK_MUTED, "normal"))
+    for y, text, size, color, weight in rows:
+        t_ = ax.text(
+            EDGE,
+            y,
+            text,
+            ha="left",
+            va="center",
+            fontsize=size,
+            color=color,
+            fontweight=weight,
+            zorder=6,
         )
-        if x1 - x0 <= BANNER_ROOM:
-            break
-        t_.set_fontsize(t_.get_fontsize() - 0.5)
+        while t_.get_fontsize() > ETA_MIN:
+            (x0, _), (x1, _) = ax.transData.inverted().transform(
+                t_.get_window_extent(renderer).get_points()
+            )
+            if x1 - x0 <= room:
+                break
+            t_.set_fontsize(t_.get_fontsize() - 0.5)
 
 
 def _draw_node(
@@ -431,7 +438,7 @@ def build_flow_figure(
         _draw_connection(ax, node, w, peak, d)
         _draw_node(ax, renderer, node, snapshot, lang, w, d, runtime, grid_off, tz, now)
     if runtime is not None:
-        _draw_banner(ax, renderer, banner_text(runtime, lang, tz, now))
+        _draw_eta(ax, renderer, *eta_lines(runtime, lang, tz, now))
     _draw_hub(ax)
     text, stale = _footer(snapshot, lang, tz, now, stale_after_min, checked_at)
     ax.text(
