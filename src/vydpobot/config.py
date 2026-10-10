@@ -123,6 +123,16 @@ class Settings(BaseSettings):
             return hashlib.sha256(self.solarman_password.get_secret_value().encode()).hexdigest()
         return None
 
+    @field_validator("solarman_app_id", "solarman_email", mode="before")
+    @classmethod
+    def _strip_str(cls, v: object) -> object:
+        return v.strip() or None if isinstance(v, str) else v
+
+    @field_validator("solarman_app_secret", mode="before")
+    @classmethod
+    def _strip_secret(cls, v: object) -> object:
+        return v.strip() or None if isinstance(v, str) else v
+
     @model_validator(mode="after")
     def _check_backend(self) -> "Settings":
         if self.solarman_backend == "portal":

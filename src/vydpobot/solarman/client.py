@@ -301,13 +301,14 @@ class SolarmanClient:
             self._auth_failures += 1
             delay = min(AUTH_BACKOFF_BASE_S * 2 ** (self._auth_failures - 1), AUTH_BACKOFF_MAX_S)
             self._auth_retry_at = _monotonic() + delay
+            reason = f"code={_code(data)} msg={data.get('msg')!r} requestId={data.get('requestId')}"
             log.warning(
-                "Solarman login rejected (%s); check SOLARMAN_EMAIL, SOLARMAN_PASSWORD and the "
-                "appId/secret. Next attempt in %.0f s",
-                data.get("msg"),
+                "Solarman login rejected (%s); check SOLARMAN_EMAIL, SOLARMAN_PASSWORD[_SHA256] "
+                "and the appId/secret. Next attempt in %.0f s",
+                reason,
                 delay,
             )
-            raise SolarmanError(f"Token request failed: {data.get('msg')}", _code(data))
+            raise SolarmanError(f"Token request failed: {reason}", _code(data))
         self._auth_failures = 0
         self._auth_retry_at = 0.0
         self._token = str(token)
