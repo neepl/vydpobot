@@ -47,30 +47,8 @@ access to your home network.
 
 ### 2. Request API credentials (appId + appSecret)
 
-Solarman does not offer self-service API keys for end users; you request them by email.
-Send something like this to **customerservice@solarmanpv.com** (some users report
-**service@solarmanpv.com** answering faster — CC both):
-
-```
-Subject: OpenAPI access request (personal, non-commercial)
-
-Hello,
-
-I would like to request Solarman OpenAPI credentials (appId and appSecret) for personal,
-read-only monitoring of my own plant via a private Telegram bot.
-
-Account email:   <your Solarman login email>
-Plant name:      <plant name as shown in the app>
-Logger SN:       <data logger serial number, on the stick label / in the app>
-Inverter:        Deye SUN-<xx>K-SG04LP3 (three-phase hybrid)
-Use:             read real-time and 5-minute historical data, ~300 requests per day
-
-Thank you!
-```
-
-Expect a reply in a few days to two weeks. You'll get an **appId** (a number) and an
-**appSecret** (a 32-character hex string), sometimes along with the API documentation PDF.
-Keep the secret private. If they ask what type of account you have, answer "end user / owner".
+See **[SOLARMAN_API_ACCESS.md](SOLARMAN_API_ACCESS.md)**: the official process, free-plan limits,
+and an email template that includes the required Developer Agreement statement.
 
 ### 3. Optional: a dedicated read-only account
 
