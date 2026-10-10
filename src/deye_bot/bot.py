@@ -3,6 +3,8 @@
 import asyncio
 import html
 import logging
+from contextlib import suppress
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -22,8 +24,15 @@ from deye_bot.config import Settings
 from deye_bot.flow import render_flow
 from deye_bot.i18n import SUPPORTED, Lang, fmt_ago, fmt_num, fmt_power, t
 from deye_bot.models import BatteryState, HistoryPoint, Snapshot
-from deye_bot.solarman.client import SolarmanClient
-from deye_bot.storage import KEY_ALERT_STATE, KEY_LANGUAGE, KEY_THRESHOLD, Storage
+from deye_bot.solarman.portal import PortalAuthError
+from deye_bot.source import DataSource, make_source
+from deye_bot.storage import (
+    KEY_ALERT_STATE,
+    KEY_LANGUAGE,
+    KEY_PORTAL_AUTH_NOTIFIED,
+    KEY_THRESHOLD,
+    Storage,
+)
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +40,7 @@ FAILURES_BEFORE_NOTICE = 3
 RETENTION_DAYS = 14
 GRID_IDLE_W = 50.0
 BAR_CELLS = 10
+QUOTA_MIN_POLL_S = 600  # OpenAPI free tier: ~548 calls/day; realtime + device SN doubles usage
 DEFAULT_GRAPH_HOURS = 24
 MAX_GRAPH_HOURS = 48
 
@@ -173,38 +183,79 @@ def _save_state(storage: Storage, state: AlertState) -> None:
     storage.set_json(KEY_ALERT_STATE, state.to_dict())
 
 
+def quota_warning(settings: Settings) -> str | None:
+    """Startup warning when OpenAPI polling with a device SN may exceed the free quota."""
+    if (
+        settings.solarman_backend == "openapi"
+        and settings.solarman_device_sn
+        and settings.poll_interval_s < QUOTA_MIN_POLL_S
+    ):
+        return (
+            "SOLARMAN_DEVICE_SN doubles API calls per poll; with POLL_INTERVAL_S="
+            f"{settings.poll_interval_s} this exceeds the free OpenAPI quota "
+            f"(~548 calls/day). Use POLL_INTERVAL_S >= {QUOTA_MIN_POLL_S} or drop the SN."
+        )
+    return None
+
+
 async def get_station_id(bot_data: dict[str, Any]) -> int:
-    """Station id (configured or discovered); the client caches the lookup."""
+    """Station id (configured or discovered); the source caches the lookup."""
     settings: Settings = bot_data["settings"]
-    return await bot_data["client"].resolve_station_id(settings.solarman_station_id)
+    return await bot_data["source"].resolve_station_id(settings.solarman_station_id)
 
 
-async def poll_once(bot_data: dict[str, Any], now: datetime) -> list[str]:
-    """One poll cycle. Returns HTML messages to send to the alert chat.
+@dataclass
+class PollResult:
+    """HTML messages produced by one poll cycle, by audience."""
 
-    Never raises: failures are counted; the 3rd consecutive one yields a single notice
-    (it sets the stale flag, so recovery produces `back_online`).
+    alerts: list[str] = field(default_factory=list)  # -> alert chat
+    admin_notices: list[str] = field(default_factory=list)  # -> admins' private chats
+
+
+def _auth_notice(bot_data: dict[str, Any]) -> list[str]:
+    """Admin notice for a rejected portal token; at most once until a poll succeeds."""
+    storage: Storage = bot_data["storage"]
+    if storage.get_json(KEY_PORTAL_AUTH_NOTIFIED):
+        return []
+    storage.set_json(KEY_PORTAL_AUTH_NOTIFIED, True)
+    return [html.escape(t(get_lang(bot_data), "portal.auth_failed"))]
+
+
+async def poll_once(bot_data: dict[str, Any], now: datetime) -> PollResult:
+    """One poll cycle. Never raises.
+
+    Failures are counted; the 3rd consecutive one yields a single stale notice for the alert
+    chat (it sets the stale flag, so recovery produces `back_online`). A rejected portal token
+    additionally yields one admin notice until the next successful poll.
     """
     settings: Settings = bot_data["settings"]
     storage: Storage = bot_data["storage"]
-    client: SolarmanClient = bot_data["client"]
+    source: DataSource = bot_data["source"]
     lang = get_lang(bot_data)
     state = _load_state(storage)
+    result = PollResult()
     try:
         station_id = await get_station_id(bot_data)
-        snap = await client.get_snapshot(station_id, settings.solarman_device_sn)
-    except Exception:
-        log.exception("Poll failed")
+        snap = await source.get_snapshot(station_id, settings.solarman_device_sn)
+    except Exception as e:
+        if isinstance(e, PortalAuthError):
+            log.warning("Poll failed: %s", e)
+            result.admin_notices = _auth_notice(bot_data)
+        else:
+            log.exception("Poll failed")
         fails = bot_data["fail_count"] = bot_data.get("fail_count", 0) + 1
         if fails < FAILURES_BEFORE_NOTICE or state.stale_notified:
-            return []
+            return result
         state.stale_notified = True
         _save_state(storage, state)
         last = storage.latest_sample()
         ago = (now - last.ts).total_seconds() if last else fails * settings.poll_interval_s
-        return [format_event(AlertEvent("stale", stale_seconds=ago), lang)]
+        result.alerts = [format_event(AlertEvent("stale", stale_seconds=ago), lang)]
+        return result
 
     bot_data["fail_count"] = 0
+    if storage.get_json(KEY_PORTAL_AUTH_NOTIFIED):
+        storage.set_json(KEY_PORTAL_AUTH_NOTIFIED, False)
     events: list[AlertEvent] = []
     try:
         is_new = storage.add_sample(snap)
@@ -222,8 +273,9 @@ async def poll_once(bot_data: dict[str, Any], now: datetime) -> list[str]:
         _save_state(storage, state)
     except Exception:
         log.exception("Alert evaluation failed")
-        return []
-    return [format_event(e, lang, snap) for e in events]
+        return result
+    result.alerts = [format_event(e, lang, snap) for e in events]
+    return result
 
 
 # --------------------------------------------------------------------------- handlers
@@ -265,7 +317,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     lang, now = get_lang(bd), datetime.now(UTC)
     try:
         station_id = await get_station_id(bd)
-        snap = await bd["client"].get_snapshot(station_id, settings.solarman_device_sn)
+        snap = await bd["source"].get_snapshot(station_id, settings.solarman_device_sn)
     except Exception:
         log.exception("Live status failed")
         snap = bd["storage"].latest_sample()
@@ -299,7 +351,7 @@ async def _graph_points(bd: dict[str, Any], start: datetime, end: datetime) -> l
     points: list[HistoryPoint] = []
     try:
         station_id = await get_station_id(bd)
-        points = await bd["client"].get_history(station_id, start, end)
+        points = await bd["source"].get_history(station_id, start, end)
     except Exception:
         log.exception("Cloud history failed; using local samples")
     if len(points) < 2:
@@ -394,17 +446,62 @@ async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply(update, html.escape(t(new, "bot.lang.set")))
 
 
+async def cmd_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Hidden admin command (portal backend): `/token <refresh_token>`.
+
+    The message is deleted first and the token is never logged or echoed.
+    """
+    bd = context.application.bot_data
+    settings: Settings = bd["settings"]
+    message, chat, user = update.effective_message, update.effective_chat, update.effective_user
+    if message is None or chat is None:
+        return
+    with suppress(Exception):  # best effort; may lack delete rights
+        await message.delete()
+    lang = get_lang(bd)
+
+    async def say(key: str) -> None:
+        await context.bot.send_message(
+            chat.id, html.escape(t(lang, key)), parse_mode=ParseMode.HTML
+        )
+
+    if chat.type != ChatType.PRIVATE:
+        await say("token.private_only")
+    elif not is_admin(user.id if user else None, settings):
+        await say("bot.admin_only")
+    elif settings.solarman_backend != "portal":
+        await say("token.not_portal")
+    elif not context.args:
+        await say("token.usage")
+    else:
+        try:
+            await bd["source"].set_refresh_token(context.args[0])
+        except Exception as e:
+            log.warning("/token rejected: %s", type(e).__name__)
+            await say("token.failed")
+            return
+        bd["storage"].set_json(KEY_PORTAL_AUTH_NOTIFIED, False)
+        await say("token.ok")
+
+
 # --------------------------------------------------------------------------- jobs
+
+
+def admin_targets(settings: Settings) -> list[int]:
+    """Private chats of the admins (chat id == user id); the alert chat if there are none."""
+    return list(settings.admin_user_ids) or [settings.alert_chat_id]
 
 
 async def poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     bd = context.application.bot_data
     try:
-        messages = await poll_once(bd, datetime.now(UTC))
-        for msg in messages:
-            await context.bot.send_message(
-                bd["settings"].alert_chat_id, msg, parse_mode=ParseMode.HTML
-            )
+        result = await poll_once(bd, datetime.now(UTC))
+        settings: Settings = bd["settings"]
+        for msg in result.alerts:
+            await context.bot.send_message(settings.alert_chat_id, msg, parse_mode=ParseMode.HTML)
+        for chat_id in admin_targets(settings) if result.admin_notices else ():
+            for msg in result.admin_notices:
+                await context.bot.send_message(chat_id, msg, parse_mode=ParseMode.HTML)
     except Exception:
         log.exception("Poll job failed")
 
@@ -449,9 +546,10 @@ def _commands(lang: Lang) -> list[BotCommand]:
 
 async def _post_init(app: Application) -> None:
     settings: Settings = app.bot_data["settings"]
-    client = SolarmanClient.from_settings(settings)
     storage = Storage(settings.db_path)
-    app.bot_data.update(client=client, storage=storage, fail_count=0)
+    app.bot_data.update(source=make_source(settings, storage), storage=storage, fail_count=0)
+    if warning := quota_warning(settings):
+        log.warning(warning)
     await app.bot.set_my_commands(_commands("en"))
     await app.bot.set_my_commands(_commands("uk"), language_code="uk")
     assert app.job_queue is not None
@@ -460,8 +558,8 @@ async def _post_init(app: Application) -> None:
 
 
 async def _post_shutdown(app: Application) -> None:
-    if client := app.bot_data.get("client"):
-        await client.aclose()
+    if source := app.bot_data.get("source"):
+        await source.aclose()
     if storage := app.bot_data.get("storage"):
         storage.close()
 
@@ -482,6 +580,7 @@ def run(settings: Settings) -> None:
         ("graph", cmd_graph),
         ("threshold", cmd_threshold),
         ("lang", cmd_lang),
+        ("token", cmd_token),  # hidden: not in COMMANDS / set_my_commands
     ):
         app.add_handler(CommandHandler(name, fn))
     app.add_error_handler(on_error)

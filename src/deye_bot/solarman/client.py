@@ -197,6 +197,15 @@ class SolarmanClient:
 
     @classmethod
     def from_settings(cls, s: Settings) -> "SolarmanClient":
+        if None in (
+            s.solarman_app_id,
+            s.solarman_app_secret,
+            s.solarman_email,
+            s.solarman_password,
+        ):
+            raise SolarmanError("OpenAPI credentials are not configured")
+        assert s.solarman_app_secret and s.solarman_password and s.solarman_email
+        assert s.solarman_app_id
         return cls(
             base_url=s.solarman_base_url,
             app_id=s.solarman_app_id,
@@ -325,6 +334,13 @@ class SolarmanClient:
         body = {"stationId": station_id, "startTime": d, "endTime": d, "timeType": 1}
         data = await self._call("/station/v1.0/history", body)
         return data.get("stationDataItems") or []
+
+    async def raw_debug(self, station_id: int, device_sn: str | None = None) -> dict:
+        """Raw realtime (and device, if an SN is given) payloads for `deye-bot dump`."""
+        out: dict = {"station_realtime": await self.station_realtime_raw(station_id)}
+        if device_sn:
+            out["device_current"] = await self.device_current_raw(device_sn)
+        return out
 
     async def resolve_station_id(self, configured: int | None) -> int:
         if configured is not None:

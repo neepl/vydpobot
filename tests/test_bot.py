@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from deye_bot import bot as bot_mod
 from deye_bot.alerts import AlertEvent
 from deye_bot.bot import (
     format_event,
@@ -17,7 +18,8 @@ from deye_bot.bot import (
     soc_bar,
 )
 from deye_bot.models import BatteryState, Snapshot
-from deye_bot.storage import KEY_THRESHOLD, Storage
+from deye_bot.solarman.portal import PortalAuthError
+from deye_bot.storage import KEY_PORTAL_AUTH_NOTIFIED, KEY_THRESHOLD, Storage
 
 TZ = ZoneInfo("Europe/Kyiv")
 NOW = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
@@ -148,7 +150,7 @@ def bd(tmp_path: Path):
     storage = Storage(tmp_path / "t.sqlite3")
     data = {
         "settings": settings,
-        "client": FakeClient(),
+        "source": FakeClient(),
         "storage": storage,
         "fail_count": 0,
     }
@@ -156,58 +158,196 @@ def bd(tmp_path: Path):
     storage.close()
 
 
+async def poll_alerts(bd, now: datetime) -> list[str]:
+    return (await poll_once(bd, now)).alerts
+
+
 def at(minutes: int) -> datetime:
     return NOW + timedelta(minutes=minutes)
 
 
 async def test_alert_fires_on_drop(bd) -> None:
-    bd["client"].queue = [snap(soc=60, ts=at(0)), snap(soc=48, ts=at(5), battery_w=-800)]
-    assert await poll_once(bd, at(0)) == []
-    msgs = await poll_once(bd, at(5))
+    bd["source"].queue = [snap(soc=60, ts=at(0)), snap(soc=48, ts=at(5), battery_w=-800)]
+    assert await poll_alerts(bd, at(0)) == []
+    msgs = await poll_alerts(bd, at(5))
     assert len(msgs) == 1 and "48%" in msgs[0] and "50%" in msgs[0]
 
 
 async def test_duplicate_timestamp_not_reevaluated(bd) -> None:
     low = snap(soc=40, ts=at(0))
-    bd["client"].queue = [low, low, low]
-    assert len(await poll_once(bd, at(1))) == 1
-    assert await poll_once(bd, at(6)) == []
-    assert await poll_once(bd, at(7)) == []
+    bd["source"].queue = [low, low, low]
+    assert len(await poll_alerts(bd, at(1))) == 1
+    assert await poll_alerts(bd, at(6)) == []
+    assert await poll_alerts(bd, at(7)) == []
 
 
 async def test_threshold_override(bd) -> None:
     bd["storage"].set_json(KEY_THRESHOLD, 30)
     assert get_threshold(bd) == 30
-    bd["client"].queue = [snap(soc=45, ts=at(0)), snap(soc=29, ts=at(5))]
-    assert await poll_once(bd, at(0)) == []
-    assert len(await poll_once(bd, at(5))) == 1
+    bd["source"].queue = [snap(soc=45, ts=at(0)), snap(soc=29, ts=at(5))]
+    assert await poll_alerts(bd, at(0)) == []
+    assert len(await poll_alerts(bd, at(5))) == 1
 
 
 async def test_stale_then_back_online(bd) -> None:
-    bd["client"].queue = [snap(ts=at(0)), snap(ts=at(0)), snap(ts=at(0)), snap(ts=at(70))]
-    assert await poll_once(bd, at(1)) == []
-    msgs = await poll_once(bd, at(45))  # same logger ts, 45 min old
+    bd["source"].queue = [snap(ts=at(0)), snap(ts=at(0)), snap(ts=at(0)), snap(ts=at(70))]
+    assert await poll_alerts(bd, at(1)) == []
+    msgs = await poll_alerts(bd, at(45))  # same logger ts, 45 min old
     assert len(msgs) == 1 and "No new data" in msgs[0]
-    assert await poll_once(bd, at(50)) == []  # already notified
-    msgs = await poll_once(bd, at(71))  # fresh data
+    assert await poll_alerts(bd, at(50)) == []  # already notified
+    msgs = await poll_alerts(bd, at(71))  # fresh data
     assert len(msgs) == 1 and "flowing again" in msgs[0]
 
 
 async def test_three_failures_one_notice(bd) -> None:
-    bd["client"].queue = [snap(ts=at(0)), *[RuntimeError("boom")] * 5]
-    await poll_once(bd, at(0))
-    results = [await poll_once(bd, at(5 * i)) for i in range(1, 6)]
+    bd["source"].queue = [snap(ts=at(0)), *[RuntimeError("boom")] * 5]
+    await poll_alerts(bd, at(0))
+    results = [await poll_alerts(bd, at(5 * i)) for i in range(1, 6)]
     assert results[0] == [] and results[1] == []
     assert len(results[2]) == 1 and "No new data" in results[2][0]
     assert results[3] == [] and results[4] == []
-    bd["client"].queue = [snap(ts=at(40))]
-    msgs = await poll_once(bd, at(41))
+    bd["source"].queue = [snap(ts=at(40))]
+    msgs = await poll_alerts(bd, at(41))
     assert len(msgs) == 1 and "flowing again" in msgs[0]
     assert bd["fail_count"] == 0
 
 
 async def test_station_resolution_failure_counts_as_poll_failure(bd) -> None:
-    bd["client"].station_error = RuntimeError("login rejected")
-    assert await poll_once(bd, at(0)) == []
+    bd["source"].station_error = RuntimeError("login rejected")
+    assert await poll_alerts(bd, at(0)) == []
     assert bd["fail_count"] == 1
     assert "station_id" not in bd
+
+
+# ------------------------------------------------------------------ portal auth notices
+
+
+async def test_auth_notice_once_then_cleared_on_success(bd) -> None:
+    bd["source"].queue = [PortalAuthError("rejected"), PortalAuthError("rejected")]
+    first = await poll_once(bd, at(0))
+    assert len(first.admin_notices) == 1 and "/token" in first.admin_notices[0]
+    assert "&lt;value&gt;" in first.admin_notices[0]  # escaped for HTML
+    assert (await poll_once(bd, at(5))).admin_notices == []  # not repeated
+    assert bd["storage"].get_json(KEY_PORTAL_AUTH_NOTIFIED) is True
+    bd["source"].queue = [snap(ts=at(10))]
+    ok = await poll_once(bd, at(10))
+    assert ok.admin_notices == [] and not bd["storage"].get_json(KEY_PORTAL_AUTH_NOTIFIED)
+    bd["source"].queue = [PortalAuthError("again")]
+    assert len((await poll_once(bd, at(15))).admin_notices) == 1  # re-armed
+
+
+async def test_non_auth_failure_has_no_admin_notice(bd) -> None:
+    bd["source"].queue = [RuntimeError("boom")]
+    assert (await poll_once(bd, at(0))).admin_notices == []
+
+
+def test_quota_warning() -> None:
+    def cfg(**kw):
+        base = {"solarman_backend": "openapi", "solarman_device_sn": "SN", "poll_interval_s": 300}
+        return SimpleNamespace(**{**base, **kw})
+
+    assert bot_mod.quota_warning(cfg()) is not None  # type: ignore[arg-type]
+    assert bot_mod.quota_warning(cfg(poll_interval_s=600)) is None  # type: ignore[arg-type]
+    assert bot_mod.quota_warning(cfg(solarman_device_sn=None)) is None  # type: ignore[arg-type]
+    assert bot_mod.quota_warning(cfg(solarman_backend="portal")) is None  # type: ignore[arg-type]
+
+
+def test_admin_targets() -> None:
+    both = SimpleNamespace(admin_user_ids=[5, 6], alert_chat_id=-1)
+    none = SimpleNamespace(admin_user_ids=[], alert_chat_id=-1)
+    assert bot_mod.admin_targets(both) == [5, 6]  # type: ignore[arg-type]
+    assert bot_mod.admin_targets(none) == [-1]  # type: ignore[arg-type]
+
+
+# ------------------------------------------------------------------ /token
+
+SECRET = "rt-super-secret-123"
+
+
+class TokenSource:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error, self.received = error, []
+
+    async def set_refresh_token(self, token: str) -> None:
+        self.received.append(token)
+        if self.error:
+            raise self.error
+
+
+class TokenEnv:
+    def __init__(self, tmp_path: Path, *, chat_type="private", uid=7, backend="portal", args=None):
+        self.deleted = False
+        self.sent: list[str] = []
+        outer = self
+
+        class Message:
+            async def delete(self) -> None:
+                outer.deleted = True
+
+        class Bot:
+            async def send_message(self, chat_id, text, **kw) -> None:
+                outer.sent.append(text)
+
+        self.storage = Storage(tmp_path / "tok.sqlite3")
+        self.source = TokenSource()
+        settings = SimpleNamespace(
+            admin_user_ids=[7], solarman_backend=backend, language="en", alert_chat_id=-1
+        )
+        self.bd = {"settings": settings, "storage": self.storage, "source": self.source}
+        self.update = SimpleNamespace(
+            effective_message=Message(),
+            effective_chat=SimpleNamespace(id=uid, type=chat_type),
+            effective_user=SimpleNamespace(id=uid),
+        )
+        self.context = SimpleNamespace(
+            application=SimpleNamespace(bot_data=self.bd),
+            bot=Bot(),
+            args=[SECRET] if args is None else args,
+        )
+
+    async def run(self) -> None:
+        await bot_mod.cmd_token(self.update, self.context)
+        self.storage.close()
+
+
+async def test_token_ok_deletes_message_never_echoes(tmp_path: Path) -> None:
+    env = TokenEnv(tmp_path)
+    env.storage.set_json(KEY_PORTAL_AUTH_NOTIFIED, True)
+    await env.run()
+    assert env.deleted and env.source.received == [SECRET]
+    assert env.sent == ["Token accepted and saved."]
+    assert all(SECRET not in m for m in env.sent)
+
+
+async def test_token_failure_does_not_echo(tmp_path: Path, caplog) -> None:
+    env = TokenEnv(tmp_path)
+    env.source.error = PortalAuthError(f"rejected {SECRET}")
+    with caplog.at_level("DEBUG"):
+        await env.run()
+    assert env.deleted and "not accepted" in env.sent[0]
+    assert SECRET not in env.sent[0] and SECRET not in caplog.text
+
+
+async def test_token_rejects_group_chat_but_deletes(tmp_path: Path) -> None:
+    env = TokenEnv(tmp_path, chat_type="supergroup")
+    await env.run()
+    assert env.deleted and env.source.received == [] and "private chat" in env.sent[0]
+
+
+async def test_token_rejects_non_admin(tmp_path: Path) -> None:
+    env = TokenEnv(tmp_path, uid=8)
+    await env.run()
+    assert env.deleted and env.source.received == [] and "administrators" in env.sent[0]
+
+
+async def test_token_wrong_backend_and_usage(tmp_path: Path) -> None:
+    env = TokenEnv(tmp_path, backend="openapi")
+    await env.run()
+    assert env.source.received == [] and "SOLARMAN_BACKEND=portal" in env.sent[0]
+    env = TokenEnv(tmp_path, args=[])
+    await env.run()
+    assert env.sent[0].startswith("Usage: /token")
+
+
+def test_token_command_is_hidden() -> None:
+    assert "token" not in bot_mod.COMMANDS

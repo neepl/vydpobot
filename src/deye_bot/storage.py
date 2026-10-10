@@ -12,6 +12,10 @@ from deye_bot.models import BatteryState, HistoryPoint, Snapshot
 KEY_ALERT_STATE = "alert_state"
 KEY_THRESHOLD = "threshold_override"
 KEY_LANGUAGE = "language_override"
+KEY_PORTAL_REFRESH_TOKEN = "portal_refresh_token"  # rotated refresh token (secret)
+KEY_PORTAL_ACCESS = "portal_access"  # {"access", "expires_at"} shared between processes (secret)
+KEY_PORTAL_BOOTSTRAP_SHA = "portal_bootstrap_sha"  # sha256 of the last-seen env bootstrap token
+KEY_PORTAL_AUTH_NOTIFIED = "portal_auth_notified"  # admins already told the token was rejected
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS samples(
@@ -28,7 +32,7 @@ def _utc(epoch: int) -> datetime:
 
 class Storage:
     def __init__(self, path: Path) -> None:
-        path = Path(path)
+        path = self.path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._db = sqlite3.connect(path, check_same_thread=False)

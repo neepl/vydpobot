@@ -1,13 +1,20 @@
-"""CLI: run | discover | dump."""
+"""CLI: run | discover | dump | portal-probe."""
 
 import argparse
 import asyncio
 import dataclasses
 import json
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from pydantic import ValidationError
 
 from deye_bot.config import Settings, get_settings
-from deye_bot.solarman import SolarmanClient
+from deye_bot.solarman import PortalClient
+from deye_bot.source import DataSource, make_source
+from deye_bot.storage import Storage
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -18,7 +25,25 @@ def _parser() -> argparse.ArgumentParser:
     d = sub.add_parser("dump", help="print raw and normalized data to verify keys and signs")
     d.add_argument("--station-id", type=int)
     d.add_argument("--device-sn")
+    pp = sub.add_parser(
+        "portal-probe",
+        help="explore the web-portal API (token scrubbed) to share with the maintainer",
+    )
+    pp.add_argument("--station-id", type=int)
+    pp.add_argument("--out", type=Path, help="write the report to FILE instead of stdout")
     return p
+
+
+@asynccontextmanager
+async def _source(settings: Settings) -> AsyncIterator[DataSource]:
+    """Data source for a CLI command (the portal backend keeps its token in the DB)."""
+    storage = Storage(settings.db_path)
+    source = make_source(settings, storage)
+    try:
+        yield source
+    finally:
+        await source.aclose()
+        storage.close()
 
 
 def _table(rows: list[tuple], headers: tuple[str, ...]) -> str:
@@ -28,37 +53,42 @@ def _table(rows: list[tuple], headers: tuple[str, ...]) -> str:
 
 
 async def discover(settings: Settings) -> None:
-    client = SolarmanClient.from_settings(settings)
-    try:
-        for st in await client.list_stations():
+    async with _source(settings) as source:
+        for st in await source.list_stations():
             loc = st.get("locationAddress") or ""
             print(
                 f"Station {st.get('id')}: {st.get('name')}  [{loc}]  "
                 f"capacity={st.get('installedCapacity')}"
             )
-            devices = await client.list_devices(int(st["id"]))
+            devices = await source.list_devices(int(st["id"]))
             rows = [(d.get("deviceSn"), d.get("deviceType"), d.get("deviceId")) for d in devices]
             print(
                 _table(rows, ("deviceSn", "deviceType", "deviceId")) if rows else "  (no devices)"
             )
             print()
-    finally:
-        await client.aclose()
 
 
 async def dump(settings: Settings, station_id: int | None, device_sn: str | None) -> None:
-    client = SolarmanClient.from_settings(settings)
-    try:
-        sid = await client.resolve_station_id(station_id or settings.solarman_station_id)
+    async with _source(settings) as source:
+        sid = await source.resolve_station_id(station_id or settings.solarman_station_id)
         sn = device_sn or settings.solarman_device_sn
-        out: dict = {"station_id": sid, "station_realtime": await client.station_realtime_raw(sid)}
-        if sn:
-            out["device_current"] = await client.device_current_raw(sn)
-        snap = await client.get_snapshot(sid, sn)
-        out["snapshot"] = dataclasses.asdict(snap)
+        out: dict = {"station_id": sid, **await source.raw_debug(sid, sn)}
+        out["snapshot"] = dataclasses.asdict(await source.get_snapshot(sid, sn))
         print(json.dumps(out, indent=2, ensure_ascii=False, default=str))
-    finally:
-        await client.aclose()
+
+
+async def portal_probe(settings: Settings, station_id: int | None) -> str:
+    if settings.solarman_backend != "portal":
+        raise SystemExit("portal-probe needs SOLARMAN_BACKEND=portal")
+    async with _source(settings) as source:
+        assert isinstance(source, PortalClient)
+        return await source.probe(station_id or settings.solarman_station_id)
+
+
+def _describe(err: dict) -> str:
+    field = ".".join(str(p) for p in err.get("loc", ())).upper()
+    msg = err["msg"].removeprefix("Value error, ")
+    return f"{field}: {msg}" if field else msg
 
 
 def main() -> None:
@@ -67,7 +97,11 @@ def main() -> None:
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
     args = _parser().parse_args()
-    settings = get_settings()
+    try:
+        settings = get_settings()
+    except ValidationError as e:
+        problems = "\n".join(f"  - {_describe(err)}" for err in e.errors())
+        raise SystemExit(f"Configuration error (check .env):\n{problems}") from None
     match args.command:
         case "run":
             from deye_bot.bot import run
@@ -77,6 +111,13 @@ def main() -> None:
             asyncio.run(discover(settings))
         case "dump":
             asyncio.run(dump(settings, args.station_id, args.device_sn))
+        case "portal-probe":
+            report = asyncio.run(portal_probe(settings, args.station_id))
+            if args.out:
+                args.out.write_text(report + "\n", encoding="utf-8")
+                print(f"Scrubbed report written to {args.out}")
+            else:
+                print(report)
 
 
 if __name__ == "__main__":

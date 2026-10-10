@@ -137,6 +137,96 @@ battery power comes back empty, compare those keys with `DEVICE_KEYS` in
 - If the logger loses Wi-Fi, the cloud data freezes. The bot then posts a "no fresh data" alert
   after `STALE_AFTER_MIN` minutes and a "back online" message when uploads resume.
 
+## Temporary: web-portal backend (unofficial)
+
+Until the official OpenAPI keys arrive (or if you never get them), the bot can read the same
+data through the **Solarman web portal** (home.solarmanpv.com) API that the website itself uses.
+Select it with `SOLARMAN_BACKEND=portal`; the default stays `openapi`.
+
+**Risks, read first:**
+
+- It is an **undocumented, private API**. It can change or break at any time without notice.
+- Using it is **likely against Solarman's terms of service**. Use it at your own risk.
+- Use a **test account only** (a second Solarman account that has the plant shared with it),
+  never your main account. If Solarman blocks the account, you lose nothing important.
+
+### How it authenticates
+
+Password login on the portal is protected by a slider CAPTCHA, so a script cannot log in. Instead
+you log in once in a browser and give the bot the **refresh token** stored in a cookie. The bot
+exchanges it for short-lived access tokens. Each exchange **rotates** the refresh token; the bot
+saves the new one in its SQLite database right away. The token you put in `.env` is only the
+starting value: the rotated one in the database wins, until you put a *different* token in `.env`.
+
+### Capturing the token
+
+1. Open a **private/incognito browser window**.
+2. Go to [home.solarmanpv.com](https://home.solarmanpv.com) and log in with the **test account**
+   (solve the slider).
+3. Press **F12**, open the **Application** tab (Chrome/Edge) or **Storage** (Firefox), then
+   **Cookies** -> `https://home.solarmanpv.com`.
+4. Find the cookie named `442287045fabeaa868450dec4baee7f4` and copy its **Value**. Or paste this
+   one-liner into the **Console** tab, which copies the decoded value to the clipboard:
+
+   ```js
+   copy(decodeURIComponent(document.cookie.split('; ').find(c=>c.startsWith('442287045fabeaa868450dec4baee7f4=')).split('=').slice(1).join('=')))
+   ```
+5. **Close the window without logging out.** Do not click "Log out": the refresh token is
+   rotated by the bot from now on, and logging out may revoke the token on the server. Also do not
+   keep using that browser session, because a second client renewing the same token would
+   invalidate the bot's.
+
+### Configuration
+
+```env
+SOLARMAN_BACKEND=portal
+SOLARMAN_PORTAL_REFRESH_TOKEN=<the cookie value>
+# Optional, only if your region needs it (sent as `area` when renewing the token):
+# SOLARMAN_PORTAL_AREA=PL
+# Optional, default https://home.solarmanpv.com (some regions: https://globalhome.solarmanpv.com):
+# SOLARMAN_PORTAL_BASE_URL=https://home.solarmanpv.com
+```
+
+The OpenAPI settings are not needed in this mode. `SOLARMAN_DEVICE_SN` is ignored (the bot logs a
+warning), because device-level data is not available through the portal. `discover` and `dump`
+work with both backends. They share the bot's database, so run them with `docker compose run --rm`
+while the bot is up, not with a different `DB_PATH`.
+
+### When the token stops working
+
+If the portal rejects the token, the bot stops calling the portal and sends **one** message to
+the admins (private chats of `ADMIN_USER_IDS`, or `ALERT_CHAT_ID` if none are set) with the
+capture steps. Repeat the steps above, then send the new value to the bot **in a private chat**:
+
+```
+/token <value>
+```
+
+The command is hidden (not in the command menu), admin-only and private-chat-only. The bot deletes
+your message immediately, checks the token by renewing it, saves it, and never echoes it back.
+
+### Probing for the 24 h history endpoint
+
+The portal's 5-minute history endpoint is not known yet, so `/graph` currently uses the samples
+the bot has stored locally (14 days are kept, so charts fill up over time after you start it).
+To help implement the real endpoint, run the read-only probe and share its output with the
+maintainer:
+
+```bash
+uv run deye-bot portal-probe --out probe.json     # or: docker compose run --rm vydpo-bot deye-bot portal-probe
+```
+
+It renews the token, lists stations and devices, fetches the station details and tries the
+candidate history URLs. All tokens are scrubbed from the output, but skim it before sharing: it
+contains your station and device details.
+
+### OpenAPI quota note
+
+The free OpenAPI tier for Smart accounts allows at most 3 plants and 200 000 calls per year
+(about 548 per day). The default 5-minute poll uses 288 calls/day; setting `SOLARMAN_DEVICE_SN`
+doubles that to about 576/day, which is over the quota. The bot logs a warning at startup if
+`SOLARMAN_DEVICE_SN` is set with `POLL_INTERVAL_S` below 600.
+
 ## Telegram setup
 
 1. Open [@BotFather](https://t.me/BotFather), send `/newbot` and use the username `vydpo_bot`
@@ -219,6 +309,7 @@ Stop: `docker compose down`. Logs are rotated (3 x 10 MB).
 | `/threshold <5..100>` | admins | Set threshold (persisted; resets the alert cycle) |
 | `/lang` | allowed chats | Show current language |
 | `/lang <en\|uk>` | admins | Switch language (persisted) |
+| `/token <value>` | admins, private chat | Portal backend only, hidden: supply a new refresh token |
 
 Access: read-only commands work in `ALERT_CHAT_ID`, `ALLOWED_CHAT_IDS`, and in private chats
 with admins. Others get a "not allowed" reply in private chats and are ignored in groups.

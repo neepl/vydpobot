@@ -514,3 +514,18 @@ async def test_token_5xx_does_not_trigger_backoff(respx_mock, client, monkeypatc
     )
     assert await client.list_stations()
     assert token.call_count == 4
+
+
+@respx.mock(assert_all_called=False)
+async def test_raw_debug(respx_mock, client):
+    mock_token(respx_mock)
+    respx_mock.post(f"{BASE}/station/v1.0/realTime").mock(
+        return_value=httpx.Response(200, json=fx("station_realtime"))
+    )
+    respx_mock.post(f"{BASE}/device/v1.0/currentData").mock(
+        return_value=httpx.Response(200, json=fx("device_current"))
+    )
+    only_station = await client.raw_debug(1)
+    assert set(only_station) == {"station_realtime"}
+    both = await client.raw_debug(1, "SN1")
+    assert set(both) == {"station_realtime", "device_current"}

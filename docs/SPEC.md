@@ -266,3 +266,80 @@ Global error handler logs exceptions. Use `parse_mode=HTML` and escape dynamic t
 - `README.md`: overview, **Solarman API access guide** (section text will be supplied by the
   planner — leave a `<!-- SOLARMAN_GUIDE -->` placeholder), BotFather setup, getting chat ids,
   `discover`/`dump` workflow incl. verifying battery/grid sign, local dev with uv, docker deploy.
+
+---
+
+## Portal backend (temporary, gated) — `SOLARMAN_BACKEND=portal`
+
+Unofficial SolarmanPV web-portal API (home.solarmanpv.com), used until official OpenAPI keys
+arrive, kept afterwards as an opt-in fallback. Default backend stays `openapi`.
+Reference implementation studied: github.com/Aksolotl123/ha-solarman-cloud (2026, `api.py`).
+
+### Auth facts
+- Password login (`grant_type=mdc_password`) is protected by a slider CAPTCHA → scripted login gets
+  HTTP 412 `AUTH_SLIDE_ERROR`. **Never attempt password login.**
+- User logs in once in a browser (private window, **test account**), copies the refresh token from
+  cookie `442287045fabeaa868450dec4baee7f4` on home.solarmanpv.com (value may be URL-encoded →
+  `urllib.parse.unquote`), then closes the window **without logging out**.
+- Renewal: `POST {base}/oauth2-s/oauth/token`, form-urlencoded
+  `grant_type=refresh_token, refresh_token=<rt>, client_id=test, system=SOLARMAN[, area=<code>]`,
+  browser-like `User-Agent` + `Accept: application/json, text/plain, */*`.
+  Response: `access_token`, `expires_in` (default 86400 if missing), `refresh_token` (**rotated on
+  every renewal**).
+- Rotation rules: persist the new refresh token **immediately** (before any other call); all
+  renewals behind one `asyncio.Lock`; never renew twice concurrently (a reused rotated token may
+  revoke the session). Renew when access token is within 10 min of expiry or on HTTP 401 (once).
+- Server may echo the refresh token in error bodies → scrub tokens from every logged/raised text.
+- Rejected refresh → `PortalAuthError` (no retry loop; poll keeps failing fast without network
+  calls until a new token is supplied).
+
+### Data endpoints (Bearer access token, JSON, browser headers)
+- Stations + live summary: `POST /maintain-s/operating/station/search` `{"page":1,"size":100}` →
+  `data` (or `stationList`) list; entries have `id`, `name`, `generationPower`, `usePower`,
+  `gridPower`, `buyPower`, `batterySoc`, `lastUpdateTime`, `networkStatus`, possibly more.
+  Normalize with the existing `snapshot_from_station` after aliasing portal names to OpenAPI names
+  (`buyPower`→`purchasePower`, `sellPower`→`wirePower` if present; only when target key absent).
+- Devices: `POST /maintain-s/power/system/deviceList` `{"stationId", "page":1, "size":100}` → `data`.
+- Station detail: `GET /maintain-s/station/{id}` (static info; used by probe only).
+- 5-min day history: **unknown**. `get_history` raises `SolarmanError("history not supported by
+  portal backend yet")` → bot falls back to local samples (already implemented). The probe tries
+  candidates (read-only GETs) and reports which answer:
+  `/maintain-s/history/power/{id}/record?year=Y&month=M&day=D`,
+  `/maintain-s/history/power/{id}/stats/day?year=Y&month=M&day=D`.
+- Device-level current data: unknown → `SOLARMAN_DEVICE_SN` ignored in portal mode (log warning once).
+
+### Config
+- `solarman_backend: Literal["openapi","portal"] = "openapi"`
+- OpenAPI fields (`solarman_app_id/app_secret/email/password`) become optional; a
+  `model_validator(mode="after")` requires them only when backend == openapi.
+- `solarman_portal_base_url = "https://home.solarmanpv.com"` (some regions:
+  `https://globalhome.solarmanpv.com`), `solarman_portal_area: str | None = None` (omit from form
+  when None), `solarman_portal_refresh_token: SecretStr | None` (bootstrap; required when portal).
+- Token precedence: storage key `portal_refresh_token` (rotated value) wins, **unless** the env
+  bootstrap token changed since last seen (store sha256 of last-seen bootstrap under
+  `portal_bootstrap_sha`) → then the env value is used and stored.
+
+### Common source interface
+`deye_bot/source.py`: `class DataSource(Protocol)` with `resolve_station_id`, `get_snapshot`,
+`get_history`, `list_stations`, `list_devices`, `raw_debug(station_id) -> dict`, `aclose`, and
+`make_source(settings, storage) -> DataSource`. Both `SolarmanClient` and `PortalClient` implement it.
+bot.py and `__main__.py` use only `make_source`/`DataSource`.
+
+### Bot
+- On `PortalAuthError` in poll: notify admins **once** (private chats of `admin_user_ids`, fallback
+  `alert_chat_id`) with instructions; flag in storage `portal_auth_notified`, cleared on success.
+- Admin command `/token <refresh_token>`: private chat + admin only; delete the user's message
+  immediately (best effort); unquote; validate by renewing; persist; reply ok/failed (never echo the
+  token). Not registered in `set_my_commands` (hidden). Only active in portal mode.
+- i18n keys (en+uk): `portal.auth_failed`, `token.ok`, `token.failed`, `token.private_only`,
+  `token.usage`, `token.not_portal`.
+
+### CLI
+- `discover`, `dump` work for both backends via `DataSource`.
+- `deye-bot portal-probe [--out FILE]`: renew token, list stations, device list, station detail, try
+  history candidates; write scrubbed JSON (tokens removed) to stdout/FILE for the user to share.
+
+### Quota note (OpenAPI)
+Free tier for Smart accounts: ≤3 plants, ≤200 000 calls/year (~548/day). Default 5-min realtime
+poll = 288/day; enabling `SOLARMAN_DEVICE_SN` doubles it to ~576/day → over quota. Log a startup
+warning if `device_sn` is set and `poll_interval_s < 600`; document in README.

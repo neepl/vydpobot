@@ -83,6 +83,23 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "bot.lang.name.uk": "Українська",
         "bot.error": "Something went wrong. Please try again later.",
         "bot.graph.invalid": "Enter a whole number of hours from 1 to 48, e.g. /graph 12",
+        "portal.auth_failed": (
+            "The Solarman portal rejected the saved token, so the bot cannot read inverter "
+            "data. To get a new one: open a private browser window, log in with the test "
+            "account at home.solarmanpv.com, press F12, go to Application, Cookies, and copy "
+            "the value of the cookie 442287045fabeaa868450dec4baee7f4. Close the window "
+            "without logging out. Then send /token <value> to this bot in a private chat."
+        ),
+        "token.ok": "Token accepted and saved.",
+        "token.failed": (
+            "The token was not accepted. Make sure you copied the whole cookie value and try again."
+        ),
+        "token.private_only": (
+            "Send /token only in a private chat with the bot. Your message was deleted; if it "
+            "contained a token, treat that token as compromised."
+        ),
+        "token.usage": "Usage: /token <refresh_token>",
+        "token.not_portal": "This command only works with SOLARMAN_BACKEND=portal.",
         "unit.w": "W",
         "unit.kw": "kW",
         "time.ago.min": "{n} minutes ago",
@@ -154,6 +171,25 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "bot.lang.name.uk": "Українська",
         "bot.error": "Щось пішло не так. Спробуйте пізніше.",
         "bot.graph.invalid": "Введіть ціле число годин від 1 до 48, наприклад /graph 12",
+        "portal.auth_failed": (
+            "Портал Solarman відхилив збережений токен, тому бот не може читати дані інвертора. "
+            "Щоб отримати новий: відкрийте приватне вікно браузера, увійдіть тестовим обліковим "
+            "записом на home.solarmanpv.com, натисніть F12, перейдіть до Application, Cookies і "
+            "скопіюйте значення cookie 442287045fabeaa868450dec4baee7f4. Закрийте вікно, не "
+            "виходячи з облікового запису. Потім надішліть боту в приватному чаті: "
+            "/token <значення>."
+        ),
+        "token.ok": "Токен прийнято й збережено.",
+        "token.failed": (
+            "Токен не прийнято. Переконайтеся, що скопіювали все значення cookie, "
+            "і спробуйте ще раз."
+        ),
+        "token.private_only": (
+            "Надсилайте /token лише в приватному чаті з ботом. Повідомлення видалено; "
+            "якщо в ньому був токен, вважайте його скомпрометованим."
+        ),
+        "token.usage": "Використання: /token <токен>",
+        "token.not_portal": "Ця команда працює лише з SOLARMAN_BACKEND=portal.",
         "unit.w": "Вт",
         "unit.kw": "кВт",
         "time.ago.min": "{n} хвилин тому",

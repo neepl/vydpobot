@@ -153,7 +153,7 @@ def _status_env():
     )
     bd = {
         "settings": settings,
-        "client": FakeClient(),
+        "source": FakeClient(),
         "storage": SimpleNamespace(get_json=lambda *a, **k: None),
     }
     context = SimpleNamespace(application=SimpleNamespace(bot_data=bd), args=[])

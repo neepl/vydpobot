@@ -3,10 +3,14 @@ from pathlib import Path
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 IntList = Annotated[list[int], NoDecode]
+
+
+def _plain(v: str | SecretStr) -> str:
+    return v.get_secret_value() if isinstance(v, SecretStr) else v
 
 
 class Settings(BaseSettings):
@@ -21,18 +25,28 @@ class Settings(BaseSettings):
     # Chats allowed to use read-only commands. Empty = alert_chat_id + admins only.
     allowed_chat_ids: IntList = Field(default_factory=list)
 
-    # --- Solarman Cloud OpenAPI ---
+    # --- Solarman backend ---
+    # "openapi": official Solarman OpenAPI. "portal": unofficial web-portal API (temporary).
+    solarman_backend: Literal["openapi", "portal"] = "openapi"
+
+    # --- Solarman Cloud OpenAPI (required when backend == openapi) ---
     solarman_base_url: str = "https://globalapi.solarmanpv.com"
-    solarman_app_id: str
-    solarman_app_secret: SecretStr
-    solarman_email: str
-    solarman_password: SecretStr  # plain text here; the client SHA-256 hashes it
+    solarman_app_id: str | None = None
+    solarman_app_secret: SecretStr | None = None
+    solarman_email: str | None = None
+    solarman_password: SecretStr | None = None  # plain text here; the client SHA-256 hashes it
     solarman_station_id: int | None = None  # None -> first station on the account
     solarman_device_sn: str | None = None  # inverter SN; enables device-level fallback
     # Set True if Solarman's batteryPower sign is reversed for your setup
     # (check with `deye-bot dump` while the battery is clearly charging).
     solarman_invert_battery_sign: bool = False
     solarman_invert_grid_sign: bool = False
+
+    # --- Solarman web portal (required when backend == portal) ---
+    solarman_portal_base_url: str = "https://home.solarmanpv.com"
+    solarman_portal_area: str | None = None  # omitted from the token request when unset
+    # Bootstrap refresh token copied from the browser cookie; rotated values live in the DB.
+    solarman_portal_refresh_token: SecretStr | None = None
 
     # --- Monitoring ---
     poll_interval_s: int = Field(default=300, ge=120)  # logger uploads ~every 5 min
@@ -54,6 +68,24 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [int(x) for x in v.replace(" ", "").split(",") if x]
         return v
+
+    @model_validator(mode="after")
+    def _check_backend(self) -> "Settings":
+        if self.solarman_backend == "portal":
+            required = {"SOLARMAN_PORTAL_REFRESH_TOKEN": self.solarman_portal_refresh_token}
+        else:
+            required = {
+                "SOLARMAN_APP_ID": self.solarman_app_id,
+                "SOLARMAN_APP_SECRET": self.solarman_app_secret,
+                "SOLARMAN_EMAIL": self.solarman_email,
+                "SOLARMAN_PASSWORD": self.solarman_password,
+            }
+        missing = [k for k, v in required.items() if v is None or not _plain(v)]
+        if missing:
+            raise ValueError(
+                f"SOLARMAN_BACKEND={self.solarman_backend} requires: {', '.join(missing)}"
+            )
+        return self
 
     @property
     def tz(self) -> ZoneInfo:
