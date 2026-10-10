@@ -273,7 +273,7 @@ def equipment_section(
     if not result.items:
         return None
     # Bold title + blank line so the block reads as its own section.
-    header = f"🩺 <b>{html.escape(t(lang, 'live.equip_header'))}</b>\n"
+    header = f"<b>{html.escape(t(lang, 'live.equip_header'))}</b>\n"
     items = list(result.items)
     items.sort(key=lambda it: not (it[1] is not None and it[1].status == "down"))  # stable
     rows = [_section_line(e, c, lang, tz, now) for e, c in items]

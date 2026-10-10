@@ -581,7 +581,7 @@ def all_status_result():
 
 def test_section_en_all_statuses_in_env_order():
     assert sect(all_status_result()).splitlines() == [
-        "🩺 <b>Equipment</b>",
+        "<b>Equipment</b>",
         "",
         "🟢 Internet",
         "🟡 Cams",
@@ -595,7 +595,7 @@ def test_section_en_all_statuses_in_env_order():
 
 def test_section_uk():
     lines = sect(all_status_result(), "uk").splitlines()
-    assert lines[0] == "🩺 <b>Обладнання</b>"
+    assert lines[0] == "<b>Обладнання</b>"
     assert lines[1] == ""
     assert lines[4] == "🔴 Lift — немає сигналу з 12:35"
     assert lines[-1] == "❓ ghost — не знайдено"
@@ -622,8 +622,8 @@ def test_caption_has_section_before_data_line_and_no_summary():
     text = cap(result(chk("A", "up"), chk("B", "down")))
     lines = text.splitlines()
     assert lines[-1].startswith("Data:")
-    assert "🩺 <b>Equipment</b>\n\n🟢 A\n🔴 B — down since —\n\nData:" in text
-    assert "\n\n🩺 <b>Equipment</b>" in text
+    assert "<b>Equipment</b>\n\n🟢 A\n🔴 B — down since —\n\nData:" in text
+    assert "\n\n<b>Equipment</b>" in text
     assert "OK ·" not in text and "1/2" not in text
 
 
@@ -699,7 +699,7 @@ async def test_refresh_live_uses_cache_only_when_enabled(env, monkeypatch):
     assert "🩺" not in seen[-1]
     env.bd["equipment"] = FakeMonitor()
     await bot_mod.refresh_live(B(), env.bd, snap())
-    assert "🩺 <b>Equipment</b>\n\n🔴 A — down since —" in seen[-1]
+    assert "<b>Equipment</b>\n\n🔴 A — down since —" in seen[-1]
 
 
 # ------------------------------------------------------------------ _post_init scheduling
