@@ -228,11 +228,14 @@ doubles that to about 576/day, which is over the quota. The bot logs a warning a
 
 - Your user ID: message [@userinfobot](https://t.me/userinfobot). For a private alert chat,
   `ALERT_CHAT_ID` is your user ID.
-- Group ID: add the bot to the group, send any message (e.g. `/status`), then open
-  `https://api.telegram.org/bot<TOKEN>/getUpdates` and read `message.chat.id`. Group IDs are
-  negative (supergroups look like `-100...`). If `getUpdates` is empty, mention the bot or
-  send a command, since with privacy mode on the bot only receives commands and mentions.
-  Stop the running bot first: `getUpdates` conflicts with polling.
+- Group ID (easiest): start the bot, add it to the group and send `/status@vydpo_bot` there.
+  The bot ignores the unknown chat and logs
+  `Ignored command from chat_id=-100… (supergroup 'Your group')`. Put that number in
+  `ALERT_CHAT_ID` and restart. Group IDs are negative; supergroups look like `-100…`.
+  Changing some group settings converts a group into a supergroup and **changes its ID**. If
+  alerts stop arriving, repeat this step.
+  Alternative: stop the bot, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` and read
+  `message.chat.id` (`getUpdates` conflicts with a running bot).
 - Set `ADMIN_USER_IDS` to the user IDs allowed to change settings (`/threshold <n>`,
   `/lang <en|uk>`). Anyone in `ALERT_CHAT_ID` or `ALLOWED_CHAT_IDS` can use `/status`,
   `/graph`, and view settings.

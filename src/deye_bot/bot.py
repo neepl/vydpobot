@@ -294,6 +294,14 @@ async def _guard(update: Update, bot_data: dict[str, Any], *, admin: bool = Fals
         return False
     uid = user.id if user else None
     if not is_allowed(chat.id, chat.type, uid, settings):
+        log.info(
+            "Ignored command from chat_id=%s (%s %r), user_id=%s. "
+            "To allow it, set ALERT_CHAT_ID or add it to ALLOWED_CHAT_IDS.",
+            chat.id,
+            chat.type,
+            chat.title or chat.username or "",
+            uid,
+        )
         if chat.type == ChatType.PRIVATE:
             await _reply(update, html.escape(t(get_lang(bot_data), "bot.not_allowed")))
         return False
