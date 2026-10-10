@@ -460,3 +460,15 @@ async def test_balance_failure_returns_none_and_logs(respx_mock, clock, caplog):
     mock_balance(respx_mock, {"success": True})
     assert await c.balance() is None
     await c.aclose()
+
+
+@respx.mock(assert_all_called=False)
+async def test_balance_api_locked_raises_unavailable(respx_mock, clock):
+    from vydpobot.solarman.client import BalanceUnavailable
+
+    routes(respx_mock)
+    mock_balance(respx_mock, {"success": False, "msg": "appId or api is locked", "code": "2101009"})
+    c = make_client()
+    with pytest.raises(BalanceUnavailable):
+        await c.balance()
+    await c.aclose()

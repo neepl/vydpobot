@@ -66,6 +66,12 @@ class SolarmanError(Exception):
         self.code = code
 
 
+class BalanceUnavailable(SolarmanError):
+    """The appId may not call /account/v1.0/balance (Solarman code 2101009)."""
+
+
+API_LOCKED = "2101009"  # "AppId or API is locked": here, the endpoint is not enabled for the key
+
 # --------------------------------------------------------------------------- normalizers
 
 
@@ -429,6 +435,8 @@ class SolarmanClient:
         try:
             data = await self._call("/account/v1.0/balance", {"appId": self._app_id})
         except SolarmanError as e:
+            if e.code == API_LOCKED:
+                raise BalanceUnavailable(str(e), e.code) from None
             log.warning("Solarman balance request failed: %s", e)
             return None
         total = _num(data.get("total"))
@@ -481,7 +489,10 @@ class SolarmanClient:
             out["device_snapshot_per_inverter"] = dataclasses.asdict(dev)
             online, volts, status = grid_state_from_device(raw)
             out["grid_state"] = {"online": online, "voltages": volts, "status": status}
-        out["api_calls_remaining"] = await self.balance()
+        try:
+            out["api_calls_remaining"] = await self.balance()
+        except BalanceUnavailable:
+            out["api_calls_remaining"] = "not available for this appId (2101009)"
         if history:
             items = await self.station_history_raw(station_id, datetime.now(self._tz).date())
             out["history_item_count"] = len(items)

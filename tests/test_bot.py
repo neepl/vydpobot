@@ -488,3 +488,22 @@ async def test_token_wrong_backend_and_usage(tmp_path: Path) -> None:
 
 def test_token_command_is_hidden() -> None:
     assert "token" not in bot_mod.COMMANDS
+
+
+async def test_balance_api_locked_skips_checks_for_a_week(bal, caplog) -> None:
+    from vydpobot.solarman.client import BalanceUnavailable
+
+    class Locked(BalanceSource):
+        async def balance(self):
+            self.calls += 1
+            raise BalanceUnavailable("appId or api is locked", "2101009")
+
+    bal["source"] = Locked([])
+    with caplog.at_level("INFO", logger=bot_mod.log.name):
+        assert await bot_mod.balance_once(bal, NOW) == []
+    assert "not enabled for this appId" in caplog.text
+    for days in (1, 6):  # quiet for the next six days, no further requests
+        assert await bot_mod.balance_once(bal, NOW + timedelta(days=days)) == []
+    assert bal["source"].calls == 1
+    await bot_mod.balance_once(bal, NOW + timedelta(days=7))
+    assert bal["source"].calls == 2  # retried after a week

@@ -67,6 +67,7 @@ from vydpobot.runtime import (
     on_battery,
     outage_active,
 )
+from vydpobot.solarman.client import BalanceUnavailable
 from vydpobot.solarman.portal import PortalAuthError
 from vydpobot.source import DataSource, make_source
 from vydpobot.storage import (
@@ -580,6 +581,9 @@ def _log_quota_plan(settings: Settings) -> None:
         log.warning(warning)
 
 
+BALANCE_RETRY_AFTER = timedelta(days=7)
+
+
 async def balance_once(bot_data: dict[str, Any], now: datetime) -> list[str]:
     """Daily real-balance check (OpenAPI only). Returns admin notices; never raises.
 
@@ -594,9 +598,19 @@ async def balance_once(bot_data: dict[str, Any], now: datetime) -> list[str]:
     try:
         today = now.astimezone(settings.tz).date().isoformat()
         st = storage.get_json(KEY_API_BALANCE) or {}
-        if st.get("date") == today:
+        if st.get("date") == today or today < (st.get("unavailable_until") or ""):
             return []
-        remaining = await source.balance()
+        try:
+            remaining = await source.balance()
+        except BalanceUnavailable:
+            until = (now.astimezone(settings.tz).date() + BALANCE_RETRY_AFTER).isoformat()
+            storage.set_json(KEY_API_BALANCE, {**st, "unavailable_until": until})
+            log.info(
+                "Solarman balance API is not enabled for this appId (2101009); "
+                "skipping balance checks until %s",
+                until,
+            )
+            return []
         if remaining is None:
             return []
         storage.set_json(
