@@ -38,8 +38,8 @@ class Settings(BaseSettings):
     poll_interval_s: int = Field(default=300, ge=120)  # logger uploads ~every 5 min
     alert_threshold_pct: float = Field(default=50, ge=5, le=100)
     alert_step_pct: float = Field(default=5, ge=1, le=50)
-    # SOC must climb this much above threshold before the alert cycle re-arms.
-    rearm_hysteresis_pct: float = Field(default=5, ge=0, le=30)
+    # SOC must climb this much above threshold before the alert cycle fully re-arms.
+    rearm_hysteresis_pct: float = Field(default=5, ge=2, le=30)  # >=2: SOC jitters ±1%
     # Warn when the logger hasn't reported for this long (0 disables).
     stale_after_min: int = Field(default=30, ge=0)
 

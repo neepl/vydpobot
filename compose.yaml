@@ -1,0 +1,17 @@
+services:
+  deye-bot:
+    build: .
+    image: deye-bot:latest
+    container_name: deye-bot
+    env_file: .env
+    environment:
+      DB_PATH: /app/data/deye_bot.sqlite3
+    restart: unless-stopped
+    volumes:
+      # The container runs as uid 10001: `mkdir -p data && sudo chown 10001 data` on the host.
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

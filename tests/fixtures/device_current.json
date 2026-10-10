@@ -1,0 +1,8 @@
+{"code": null, "msg": null, "success": true, "deviceSn": "2301012345", "deviceType": "INVERTER", "collectionTime": 1760000010, "dataList": [
+ {"key": "BMS_SOC", "value": "67", "unit": "%", "name": "SOC"},
+ {"key": "S_P_T", "value": "2400.0", "unit": "W", "name": "Total Solar Power"},
+ {"key": "E_Puse_t1", "value": "1190", "unit": "W", "name": "Total Consumption Power"},
+ {"key": "PG_Pt1", "value": "-430", "unit": "W", "name": "Total Grid Power"},
+ {"key": "B_P1", "value": "-760", "unit": "W", "name": "Battery Power"},
+ {"key": "B_left_cap1", "value": "66", "unit": "%", "name": "Battery Capacity"}
+]}
