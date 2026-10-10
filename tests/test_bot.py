@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
+from telegram_fakes import real_bot_signatures
 
 from deye_bot import bot as bot_mod
 from deye_bot.alerts import AlertEvent
@@ -284,6 +285,7 @@ class TokenEnv:
             async def delete(self) -> None:
                 outer.deleted = True
 
+        @real_bot_signatures
         class Bot:
             async def send_message(self, chat_id, text, **kw) -> None:
                 outer.sent.append(text)

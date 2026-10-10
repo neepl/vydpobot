@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from telegram.error import BadRequest, Forbidden, NetworkError
+from telegram_fakes import real_bot_signatures
 
 from deye_bot import bot as bot_mod
 from deye_bot.i18n import t
@@ -105,6 +106,7 @@ class FakeMessage:
         self.deleted = True
 
 
+@real_bot_signatures
 class FakeBot:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
@@ -131,13 +133,13 @@ class FakeBot:
             raise self.pin_error
         self.pins.append((chat_id, message_id, kw.get("disable_notification")))
 
-    async def unpin_chat_message(self, chat_id: int, message_id: int) -> None:
+    async def unpin_chat_message(self, chat_id: int, message_id: int | None = None) -> None:
         self.unpins.append((chat_id, message_id))
 
     async def delete_message(self, chat_id: int, message_id: int) -> None:
         self.deleted.append((chat_id, message_id))
 
-    async def edit_message_media(self, chat_id: int, message_id: int, media: Any) -> None:
+    async def edit_message_media(self, media: Any, chat_id: int, message_id: int) -> None:
         if err := self.edit_errors.get(chat_id):
             raise err
         assert media.media is not None
@@ -363,3 +365,13 @@ async def test_lang_applies_on_next_refresh(env):
     env.storage.set_json("language_override", "uk")
     await poll(env)
     assert "кВт" in env.bot.edits[0][2]
+
+
+async def test_fake_bot_rejects_calls_the_real_bot_would_reject():
+    # Regression: edit_message_media(chat_id, message_id, media=...) crashed in production
+    # ("multiple values for argument 'media'") while a permissive fake accepted it.
+    fake = FakeBot()
+    media = SimpleNamespace(media=PNG, caption="c")
+    with pytest.raises(TypeError):
+        await fake.edit_message_media(CHAT, 1, media=media)
+    await fake.edit_message_media(media=media, chat_id=CHAT, message_id=1)

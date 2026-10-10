@@ -361,7 +361,9 @@ def _live_map(storage: Storage) -> dict[str, int]:
 async def _pin(bot: Any, chat_id: int, message_id: int) -> bool:
     """Pin silently; False if the bot lacks the right."""
     try:
-        await bot.pin_chat_message(chat_id, message_id, disable_notification=True)
+        await bot.pin_chat_message(
+            chat_id=chat_id, message_id=message_id, disable_notification=True
+        )
     except (BadRequest, Forbidden) as e:
         log.info("Cannot pin live message in chat %s: %s", chat_id, e)
         return False
@@ -370,7 +372,9 @@ async def _pin(bot: Any, chat_id: int, message_id: int) -> bool:
 
 async def _send_live(bot: Any, chat_id: int, png: bytes, caption: str) -> tuple[int, bool]:
     """Send the live photo and pin it. Returns (message_id, pinned)."""
-    msg = await bot.send_photo(chat_id, png, caption=caption, parse_mode=ParseMode.HTML)
+    msg = await bot.send_photo(
+        chat_id=chat_id, photo=png, caption=caption, parse_mode=ParseMode.HTML
+    )
     return msg.message_id, await _pin(bot, chat_id, msg.message_id)
 
 
@@ -415,7 +419,7 @@ async def refresh_live(
         chat_id = int(key)
         try:
             media = InputMediaPhoto(png, caption=caption, parse_mode=ParseMode.HTML)
-            await bot.edit_message_media(chat_id, message_id, media=media)
+            await bot.edit_message_media(media=media, chat_id=chat_id, message_id=message_id)
         except BadRequest as e:
             if "message is not modified" in str(e).lower():
                 continue
@@ -636,7 +640,9 @@ async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     live = _live_map(storage)
 
     async def say(msg_key: str) -> None:
-        await bot.send_message(chat.id, html.escape(t(lang, msg_key)), parse_mode=ParseMode.HTML)
+        await bot.send_message(
+            chat_id=chat.id, text=html.escape(t(lang, msg_key)), parse_mode=ParseMode.HTML
+        )
 
     if context.args and context.args[0].lower() == "off":
         if key not in live:
@@ -644,9 +650,9 @@ async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             message_id = live.pop(key)
             with suppress(Exception):
-                await bot.unpin_chat_message(chat.id, message_id)
+                await bot.unpin_chat_message(chat_id=chat.id, message_id=message_id)
             with suppress(Exception):
-                await bot.delete_message(chat.id, message_id)
+                await bot.delete_message(chat_id=chat.id, message_id=message_id)
             storage.set_json(KEY_LIVE_MESSAGES, live)
             await say("live.stopped")
     else:
@@ -705,7 +711,7 @@ async def cmd_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     async def say(key: str) -> None:
         await context.bot.send_message(
-            chat.id, html.escape(t(lang, key)), parse_mode=ParseMode.HTML
+            chat_id=chat.id, text=html.escape(t(lang, key)), parse_mode=ParseMode.HTML
         )
 
     if chat.type != ChatType.PRIVATE:
@@ -742,10 +748,12 @@ async def poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         result = await poll_once(bd, datetime.now(UTC))
         settings: Settings = bd["settings"]
         for msg in result.alerts:
-            await context.bot.send_message(settings.alert_chat_id, msg, parse_mode=ParseMode.HTML)
+            await context.bot.send_message(
+                chat_id=settings.alert_chat_id, text=msg, parse_mode=ParseMode.HTML
+            )
         for chat_id in admin_targets(settings) if result.admin_notices else ():
             for msg in result.admin_notices:
-                await context.bot.send_message(chat_id, msg, parse_mode=ParseMode.HTML)
+                await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.HTML)
     except Exception:
         log.exception("Poll job failed")
     try:
