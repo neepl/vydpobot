@@ -206,7 +206,7 @@ MESSAGES: dict[Lang, dict[str, str]] = {
 }
 
 
-def t(lang: Lang, key: str, **kwargs: object) -> str:
+def t(lang: Lang, key: str, /, **kwargs: object) -> str:
     """Translate `key`; fall back to English, then to the key itself."""
     text = MESSAGES.get(lang, {}).get(key) or MESSAGES["en"].get(key)
     if text is None:

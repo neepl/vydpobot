@@ -97,3 +97,10 @@ def test_uk_ago(seconds, expected):
 )
 def test_en_ago(seconds, expected):
     assert fmt_ago("en", seconds) == expected
+
+
+@pytest.mark.parametrize("lang", ["en", "uk"])
+def test_placeholder_named_like_t_params(lang):
+    # `lang`/`key` placeholders must not collide with t()'s own parameters.
+    assert "English" in t(lang, "bot.lang.current", lang="English")
+    assert t(lang, "no.such.key", key="x") == "no.such.key"
