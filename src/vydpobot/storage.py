@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from vydpo_bot.models import BatteryState, HistoryPoint, Snapshot
+from vydpobot.models import BatteryState, HistoryPoint, Snapshot
 
 KEY_ALERT_STATE = "alert_state"
 KEY_THRESHOLD = "threshold_override"
@@ -29,20 +29,24 @@ CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT);
 """
 _COLS = "ts, soc, pv_w, load_w, grid_w, battery_w, battery_state"
 
-LEGACY_DB_NAME = "deye_bot.sqlite3"  # pre-rename name; migrated on first start
+# Pre-rename DB names, newest first; the first one found is migrated on first start.
+LEGACY_DB_NAMES = ("vydpo_bot.sqlite3", "deye_bot.sqlite3")
 _COMPANIONS = ("", "-wal", "-shm", ".portal.lock")
 
 log = logging.getLogger(__name__)
 
 
 def migrate_legacy_db(path: Path) -> bool:
-    """Move a pre-rename `deye_bot.sqlite3` (and its WAL/SHM/lock files) to `path`.
+    """Move a pre-rename database (and its WAL/SHM/lock files) to `path`.
 
-    Only when `path` does not exist yet and the legacy file sits in the same directory, so an
+    Only when `path` does not exist yet and a legacy file sits in the same directory, so an
     existing database is never overwritten. Returns True if a migration happened.
     """
-    legacy = path.with_name(LEGACY_DB_NAME)
-    if path.exists() or legacy == path or not legacy.exists():
+    if path.exists():
+        return False
+    candidates = (path.with_name(n) for n in LEGACY_DB_NAMES)
+    legacy = next((c for c in candidates if c != path and c.exists()), None)
+    if legacy is None:
         return False
     for suffix in _COMPANIONS:
         src = legacy.with_name(legacy.name + suffix)

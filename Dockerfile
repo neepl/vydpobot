@@ -19,4 +19,4 @@ WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 USER bot
 VOLUME /app/data
-CMD ["vydpo-bot", "run"]
+CMD ["vydpobot", "run"]

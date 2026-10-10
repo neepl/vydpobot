@@ -1,11 +1,11 @@
 services:
-  vydpo-bot:
+  vydpobot:
     build: .
-    image: vydpo-bot:latest
-    container_name: vydpo-bot
+    image: vydpobot:latest
+    container_name: vydpobot
     env_file: .env
     environment:
-      DB_PATH: /app/data/vydpo_bot.sqlite3
+      DB_PATH: /app/data/vydpobot.sqlite3
     restart: unless-stopped
     volumes:
       # The container runs as uid 10001: `mkdir -p data && sudo chown 10001 data` on the host.

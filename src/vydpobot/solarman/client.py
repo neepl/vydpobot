@@ -12,8 +12,8 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from vydpo_bot.config import Settings
-from vydpo_bot.models import BatteryState, HistoryPoint, Snapshot
+from vydpobot.config import Settings
+from vydpobot.models import BatteryState, HistoryPoint, Snapshot
 
 log = logging.getLogger(__name__)
 
@@ -347,7 +347,7 @@ class SolarmanClient:
         return data.get("stationDataItems") or []
 
     async def raw_debug(self, station_id: int, device_sn: str | None = None) -> dict:
-        """Raw realtime (and device, if an SN is given) payloads for `vydpo-bot dump`."""
+        """Raw realtime (and device, if an SN is given) payloads for `vydpobot dump`."""
         out: dict = {"station_realtime": await self.station_realtime_raw(station_id)}
         if device_sn:
             out["device_current"] = await self.device_current_raw(device_sn)

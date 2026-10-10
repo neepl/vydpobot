@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from vydpo_bot.alerts import AlertEvent, AlertState, evaluate_soc, evaluate_staleness
+from vydpobot.alerts import AlertEvent, AlertState, evaluate_soc, evaluate_staleness
 
 THR, STEP, HYST = 50.0, 5.0, 5.0
 

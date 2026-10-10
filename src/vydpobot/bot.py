@@ -14,15 +14,15 @@ from telegram.constants import ChatAction, ChatType, ParseMode
 from telegram.error import BadRequest, Forbidden
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from vydpo_bot.alerts import (
+from vydpobot.alerts import (
     AlertEvent,
     AlertState,
     evaluate_soc,
     evaluate_staleness,
 )
-from vydpo_bot.charts import render_chart, summarize
-from vydpo_bot.config import Settings
-from vydpo_bot.equipment import (
+from vydpobot.charts import render_chart, summarize
+from vydpobot.config import Settings
+from vydpobot.equipment import (
     EquipEvent,
     EquipmentError,
     EquipmentMonitor,
@@ -30,12 +30,12 @@ from vydpo_bot.equipment import (
     diff,
     health_counts,
 )
-from vydpo_bot.flow import render_flow
-from vydpo_bot.i18n import SUPPORTED, Lang, fmt_ago, fmt_duration, fmt_num, fmt_power, t
-from vydpo_bot.models import BatteryState, HistoryPoint, Snapshot
-from vydpo_bot.solarman.portal import PortalAuthError
-from vydpo_bot.source import DataSource, make_source
-from vydpo_bot.storage import (
+from vydpobot.flow import render_flow
+from vydpobot.i18n import SUPPORTED, Lang, fmt_ago, fmt_duration, fmt_num, fmt_power, t
+from vydpobot.models import BatteryState, HistoryPoint, Snapshot
+from vydpobot.solarman.portal import PortalAuthError
+from vydpobot.source import DataSource, make_source
+from vydpobot.storage import (
     KEY_ALERT_STATE,
     KEY_EQUIPMENT_STATE,
     KEY_LANGUAGE,

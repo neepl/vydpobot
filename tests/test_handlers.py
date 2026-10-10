@@ -11,11 +11,11 @@ from typing import Any
 import pytest
 from telegram_fakes import real_bot_signatures
 
-from vydpo_bot import bot as bot_mod
-from vydpo_bot.alerts import AlertState
-from vydpo_bot.i18n import MESSAGES, SUPPORTED, Lang, t
-from vydpo_bot.models import BatteryState, Snapshot
-from vydpo_bot.storage import KEY_ALERT_STATE, KEY_LANGUAGE, KEY_THRESHOLD, Storage
+from vydpobot import bot as bot_mod
+from vydpobot.alerts import AlertState
+from vydpobot.i18n import MESSAGES, SUPPORTED, Lang, t
+from vydpobot.models import BatteryState, Snapshot
+from vydpobot.storage import KEY_ALERT_STATE, KEY_LANGUAGE, KEY_THRESHOLD, Storage
 
 ADMIN, USER = 7, 8
 ALERT_CHAT, UNKNOWN_CHAT = -100, -999

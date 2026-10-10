@@ -9,10 +9,10 @@ import httpx
 import pytest
 import respx
 
-from vydpo_bot.models import BatteryState, Snapshot
-from vydpo_bot.solarman import SolarmanClient, SolarmanError
-from vydpo_bot.solarman import client as client_mod
-from vydpo_bot.solarman.client import (
+from vydpobot.models import BatteryState, Snapshot
+from vydpobot.solarman import SolarmanClient, SolarmanError
+from vydpobot.solarman import client as client_mod
+from vydpobot.solarman.client import (
     battery_state,
     history_from_station,
     merge_snapshots,

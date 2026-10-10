@@ -12,9 +12,9 @@ import respx
 from pydantic import SecretStr
 from telegram_fakes import real_bot_signatures
 
-from vydpo_bot import bot as bot_mod
-from vydpo_bot.config import Settings
-from vydpo_bot.equipment import (
+from vydpobot import bot as bot_mod
+from vydpobot.config import Settings
+from vydpobot.equipment import (
     Check,
     EquipmentError,
     EquipmentMonitor,
@@ -22,9 +22,9 @@ from vydpo_bot.equipment import (
     diff,
     match_entries,
 )
-from vydpo_bot.i18n import fmt_duration, t
-from vydpo_bot.models import BatteryState, Snapshot
-from vydpo_bot.storage import KEY_EQUIPMENT_STATE, Storage
+from vydpobot.i18n import fmt_duration, t
+from vydpobot.models import BatteryState, Snapshot
+from vydpobot.storage import KEY_EQUIPMENT_STATE, Storage
 
 TZ = ZoneInfo("Europe/Kyiv")
 NOW = datetime(2026, 10, 10, 9, 40, tzinfo=UTC)  # 12:40 local

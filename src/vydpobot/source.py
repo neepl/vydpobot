@@ -3,11 +3,11 @@
 from datetime import datetime
 from typing import Protocol
 
-from vydpo_bot.config import Settings
-from vydpo_bot.models import HistoryPoint, Snapshot
-from vydpo_bot.solarman.client import SolarmanClient
-from vydpo_bot.solarman.portal import PortalClient
-from vydpo_bot.storage import Storage
+from vydpobot.config import Settings
+from vydpobot.models import HistoryPoint, Snapshot
+from vydpobot.solarman.client import SolarmanClient
+from vydpobot.solarman.portal import PortalClient
+from vydpobot.storage import Storage
 
 
 class DataSource(Protocol):

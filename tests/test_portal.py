@@ -11,12 +11,12 @@ import pytest
 import respx
 from pydantic import ValidationError
 
-from vydpo_bot.config import Settings
-from vydpo_bot.models import BatteryState
-from vydpo_bot.solarman import PortalAuthError, PortalClient, SolarmanClient, SolarmanError
-from vydpo_bot.solarman import portal as portal_mod
-from vydpo_bot.source import make_source
-from vydpo_bot.storage import KEY_PORTAL_BOOTSTRAP_SHA, KEY_PORTAL_REFRESH_TOKEN, Storage
+from vydpobot.config import Settings
+from vydpobot.models import BatteryState
+from vydpobot.solarman import PortalAuthError, PortalClient, SolarmanClient, SolarmanError
+from vydpobot.solarman import portal as portal_mod
+from vydpobot.source import make_source
+from vydpobot.storage import KEY_PORTAL_BOOTSTRAP_SHA, KEY_PORTAL_REFRESH_TOKEN, Storage
 
 TZ = ZoneInfo("Europe/Kyiv")
 BASE = "https://portal.test"

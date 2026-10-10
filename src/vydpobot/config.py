@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     solarman_station_id: int | None = None  # None -> first station on the account
     solarman_device_sn: str | None = None  # inverter SN; enables device-level fallback
     # Set True if Solarman's batteryPower sign is reversed for your setup
-    # (check with `vydpo-bot dump` while the battery is clearly charging).
+    # (check with `vydpobot dump` while the battery is clearly charging).
     solarman_invert_battery_sign: bool = False
     solarman_invert_grid_sign: bool = False
 
@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     # Default UI language; admins can override at runtime with /lang (persisted in DB).
     language: Literal["en", "uk"] = "en"
     timezone: str = "Europe/Kyiv"
-    db_path: Path = Path("data/vydpo_bot.sqlite3")
+    db_path: Path = Path("data/vydpobot.sqlite3")
 
     @field_validator("admin_user_ids", "allowed_chat_ids", mode="before")
     @classmethod

@@ -1,4 +1,4 @@
-# vydpo-bot
+# vydpobot
 
 [@vydpo_bot](https://t.me/vydpo_bot) — Telegram bot for building vital stats. First module:
 monitors a Deye hybrid inverter (tested design target: three-phase LV
@@ -72,8 +72,8 @@ SOLARMAN_PASSWORD=your-plain-password     # hashed (SHA-256) by the bot before s
 List the plants and devices visible to the account:
 
 ```bash
-uv run vydpo-bot discover                      # local dev
-docker compose exec vydpo-bot vydpo-bot discover  # on the server (bot running)
+uv run vydpobot discover                      # local dev
+docker compose exec vydpobot vydpobot discover  # on the server (bot running)
 ```
 
 Copy the station `id` into `SOLARMAN_STATION_ID`. Copy the `deviceSn` of the device with type
@@ -85,12 +85,12 @@ inverters this matters: some plants report battery values only at device level.
 
 The bot normalizes to: `battery_w > 0` = charging, `battery_w < 0` = discharging,
 `grid_w > 0` = importing, `grid_w < 0` = exporting. Solarman data differs between setups, so
-check once. Run `vydpo-bot dump` **in the daytime while the battery is clearly charging** (SOC
+check once. Run `vydpobot dump` **in the daytime while the battery is clearly charging** (SOC
 rising in the app):
 
 ```bash
-uv run vydpo-bot dump
-uv run vydpo-bot dump --station-id 123456 --device-sn 2401012345   # include device-level data
+uv run vydpobot dump
+uv run vydpobot dump --station-id 123456 --device-sn 2401012345   # include device-level data
 ```
 
 At the bottom is the normalized snapshot. `battery_w` must be **positive** while charging and
@@ -101,7 +101,7 @@ importing from the grid (check in the evening with no PV). If it's reversed, set
 
 The raw `dataList` section of the dump also shows every key your inverter reports. If SOC or
 battery power comes back empty, compare those keys with `DEVICE_KEYS` in
-`src/vydpo_bot/solarman/client.py` and adjust.
+`src/vydpobot/solarman/client.py` and adjust.
 
 ### 6. Limits and freshness
 
@@ -175,7 +175,7 @@ SOLARMAN_PORTAL_REFRESH_TOKEN=<the refresh_token value>
 The OpenAPI settings are not needed in this mode. `SOLARMAN_DEVICE_SN` is ignored (the bot logs a
 warning), because device-level data is not available through the portal. `discover` and `dump`
 work with both backends. They must share the bot's database, so on the server run them with
-`docker compose exec vydpo-bot vydpo-bot …`, not with a different `DB_PATH`.
+`docker compose exec vydpobot vydpobot …`, not with a different `DB_PATH`.
 
 Measured battery power comes from the portal's Flow Chart endpoint (`fast/system`), one request
 per poll. Only if that request fails (or lacks battery data) does the bot fall back to the station
@@ -204,7 +204,7 @@ To help implement the real endpoint, run the read-only probe and share its outpu
 maintainer:
 
 ```bash
-uv run vydpo-bot portal-probe --out probe.json     # or: docker compose exec vydpo-bot vydpo-bot portal-probe
+uv run vydpobot portal-probe --out probe.json     # or: docker compose exec vydpobot vydpobot portal-probe
 ```
 
 It renews the token, lists stations and devices, fetches the station details and tries the
@@ -262,7 +262,7 @@ Requires [uv](https://docs.astral.sh/uv/). The project uses its own `.venv`.
 
 ```bash
 uv sync                          # creates .venv with dev dependencies
-uv run vydpo-bot run              # start the bot
+uv run vydpobot run              # start the bot
 uv run pytest -q
 uv run ruff check src tests && uv run ruff format --check src tests
 ```
@@ -284,52 +284,61 @@ stored samples) lives in `./data` on the host, so it survives restarts, rebuilds
    ```
 2. Get the code and configure it:
    ```bash
-   git clone <this repo> vydpo-bot && cd vydpo-bot
+   git clone <this repo> vydpobot && cd vydpobot
    cp .env.example .env && chmod 600 .env && $EDITOR .env
    mkdir -p data && sudo chown 10001:10001 data   # the container runs as non-root uid 10001
    ```
-3. **Stop any other running copy of the bot** (for example `uv run vydpo-bot run` on your
+3. **Stop any other running copy of the bot** (for example `uv run vydpobot run` on your
    laptop). Telegram allows only one poller per token, otherwise both fail with `Conflict`.
 4. Portal backend only: the refresh token rotates, so a token that another machine already
    used is dead. Either capture a fresh one for the server (see
    [Capturing the token](#capturing-the-token)), or stop the local bot and copy its database,
    which holds the current rotated token:
    ```bash
-   scp data/vydpo_bot.sqlite3 vps:vydpo-bot/data/ && ssh vps 'sudo chown 10001:10001 vydpo-bot/data/*'
+   scp data/vydpobot.sqlite3 vps:vydpobot/data/ && ssh vps 'sudo chown 10001:10001 vydpobot/data/*'
    ```
 5. Start it and check it:
    ```bash
    docker compose up -d --build
    docker compose ps                  # STATUS should be "Up"
-   docker compose logs -f vydpo-bot   # Ctrl+C stops following, the bot keeps running
+   docker compose logs -f vydpobot   # Ctrl+C stops following, the bot keeps running
    ```
 
-### Upgrading from `deye-bot`
+### Upgrading from `deye-bot` / `vydpo-bot`
 
-The project was renamed: the package is now `vydpo_bot`, the CLI is `vydpo-bot`, and the database is
-`data/vydpo_bot.sqlite3`. Upgrade as usual with `git pull && docker compose up -d --build`. On first
-start the bot renames an existing `data/deye_bot.sqlite3` (with its WAL and lock files) to the new
-name, so the portal token, settings, and the pinned live message carry over. An existing
-`vydpo_bot.sqlite3` is never overwritten.
+The project was renamed: the package and CLI are now `vydpobot`, and so are the compose service and
+container. The database is `data/vydpobot.sqlite3`. Because the compose **service name changed**,
+stop the old container first, otherwise it keeps running next to the new one (two bots on one token
+fail with `Conflict` and fight over the portal token):
+
+```bash
+docker compose down            # with the OLD compose.yaml, before pulling
+git pull
+docker compose up -d --build --remove-orphans
+```
+
+On first start the bot renames an existing `data/vydpo_bot.sqlite3` or `data/deye_bot.sqlite3`
+(with its WAL and lock files) to the new name, so the portal token, settings, equipment state and
+the pinned live message carry over. An existing `vydpobot.sqlite3` is never overwritten.
 
 ### Admin commands against the running bot
 
 Run them **inside** the running container, so they share its database and token:
 
 ```bash
-docker compose exec vydpo-bot vydpo-bot discover
-docker compose exec vydpo-bot vydpo-bot dump
-docker compose exec vydpo-bot vydpo-bot portal-probe
+docker compose exec vydpobot vydpobot discover
+docker compose exec vydpobot vydpobot dump
+docker compose exec vydpobot vydpobot portal-probe
 ```
 
-(If the bot is stopped, use `docker compose run --rm vydpo-bot vydpo-bot …` instead: it starts a
+(If the bot is stopped, use `docker compose run --rm vydpobot vydpobot …` instead: it starts a
 temporary container that is removed afterwards.)
 
 ### Day-to-day operations
 
 | Task | Command |
 |---|---|
-| Follow logs | `docker compose logs -f --tail 100 vydpo-bot` |
+| Follow logs | `docker compose logs -f --tail 100 vydpobot` |
 | Restart (e.g. after editing `.env`) | `docker compose up -d` (re-reads `.env`; `restart` alone does not) |
 | Update to a new version | `git pull && docker compose up -d --build` |
 | Stop temporarily | `docker compose stop` (stays stopped, even after a reboot, until `docker compose start`) |
@@ -339,11 +348,11 @@ Logs are rotated (3 × 10 MB).
 
 ### Backups
 
-`./data/vydpo_bot.sqlite3` is the only state worth backing up. In portal mode it also holds the
+`./data/vydpobot.sqlite3` is the only state worth backing up. In portal mode it also holds the
 live refresh token, so treat backups as secrets. A consistent copy while the bot is running:
 
 ```bash
-docker compose exec vydpo-bot python -c "import sqlite3; s=sqlite3.connect('/app/data/vydpo_bot.sqlite3'); d=sqlite3.connect('/app/data/backup.sqlite3'); s.backup(d)"
+docker compose exec vydpobot python -c "import sqlite3; s=sqlite3.connect('/app/data/vydpobot.sqlite3'); d=sqlite3.connect('/app/data/backup.sqlite3'); s.backup(d)"
 ```
 
 ## Bot commands
