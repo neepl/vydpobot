@@ -21,7 +21,7 @@ from matplotlib.figure import Figure  # noqa: E402
 from matplotlib.patches import Circle, FancyBboxPatch, Polygon, Rectangle  # noqa: E402
 
 from vydpobot.charts import C_BAT, C_GRID, C_LOAD, C_PV, C_THR, GRID_C, INK, INK_MUTED  # noqa: E402
-from vydpobot.i18n import Lang, fmt_ago, fmt_hm, fmt_power, fmt_until, t  # noqa: E402
+from vydpobot.i18n import Lang, fmt_ago, fmt_hm, fmt_power, t  # noqa: E402
 from vydpobot.models import Snapshot  # noqa: E402
 from vydpobot.runtime import Runtime  # noqa: E402
 
@@ -252,8 +252,8 @@ def _node_texts(
     sub = ""
     if node == "grid" and grid_off:
         value = t(lang, "flow.grid_value_off")
-    if node == "grid" and (grid_off or snap.grid_online is False):
-        sub = t(lang, "flow.grid_off")
+    if node == "grid" and grid_off:
+        sub = ""  # the red value already says it; a second "grid off" line only repeats it
     elif node == "grid" and watts is not None:
         key = "idle" if direction is None else "export" if watts < 0 else "import"
         sub = t(lang, f"flow.grid_{key}")
@@ -268,47 +268,13 @@ def _node_texts(
             else "discharging"
         )
         sub = t(lang, f"flow.state_{state}") if state else ""
-    return label, value, sub
-
-
-# Outage ETA block: left column, just above the battery value (the area between the solar
-# and battery corners is otherwise empty).
-ETA_MAIN_Y, ETA_UNTIL_Y = 4.15, 3.65
-ETA_SIZE, ETA_UNTIL_SIZE, ETA_MIN = 16.0, 12.0, 11.0
-
-
-def eta_lines(runtime: Runtime, lang: Lang, tz: ZoneInfo, now: datetime) -> tuple[str, str | None]:
-    """('≈ 7 год 40 хв', 'до 03:40'), or ('> 72 год', None) when capped."""
-    if runtime.capped:
-        return t(lang, "flow.eta_capped"), None
-    until = t(lang, "flow.eta_until", when=fmt_until(runtime.ends_at, tz, now))
-    return f"≈ {fmt_hm(lang, runtime.hours)}", until
-
-
-def _draw_eta(ax: Axes, renderer: RendererBase, main: str, until: str | None) -> None:
-    room = HUB[0] - ELBOW_DX - TEXT_GAP - EDGE  # left edge up to the battery's vertical run
-    rows = [(ETA_MAIN_Y, main, ETA_SIZE, INK, "bold")]
-    if until:
-        rows.append((ETA_UNTIL_Y, until, ETA_UNTIL_SIZE, INK_MUTED, "normal"))
-    for y, text, size, color, weight in rows:
-        t_ = ax.text(
-            EDGE,
-            y,
-            text,
-            ha="left",
-            va="center",
-            fontsize=size,
-            color=color,
-            fontweight=weight,
-            zorder=6,
-        )
-        while t_.get_fontsize() > ETA_MIN:
-            (x0, _), (x1, _) = ax.transData.inverted().transform(
-                t_.get_window_extent(renderer).get_points()
+        if runtime is not None and sub:
+            # outage: remaining time on its own line under the state, same small muted style
+            eta = (
+                t(lang, "flow.eta_capped") if runtime.capped else f"≈ {fmt_hm(lang, runtime.hours)}"
             )
-            if x1 - x0 <= room:
-                break
-            t_.set_fontsize(t_.get_fontsize() - 0.5)
+            sub = f"{sub}\n{eta}"
+    return label, value, sub
 
 
 def _draw_node(
@@ -382,8 +348,9 @@ def _draw_node(
         text(5.95, value, 19, C_THR if node == "grid" and grid_off else INK, "bold")
         text(5.5, sub, 11, INK_MUTED)
     else:
-        text(3.0, value, 19, INK, "bold")
-        text(2.55, sub, 11, INK_MUTED)
+        # bottom row: battery and home share these lines, so their values stay aligned
+        text(3.04, value, 19, INK, "bold")  # 1 unit = 100 px; +0.04 = 4 px up
+        text(2.59, sub, 11, INK_MUTED)
         text(0.85, label, 12, INK_MUTED)
 
 
@@ -419,6 +386,9 @@ def build_flow_figure(
     grid_off: bool = False,
 ) -> tuple[Figure, Axes]:
     now = now or datetime.now(tz)
+    # The inverter reports no grid voltage: show the grid as off even if the battery is not
+    # discharging (sunny outage), the same way as during a confirmed outage.
+    grid_off = grid_off or snapshot.grid_online is False
     watts: dict[Node, float | None] = {
         "pv": snapshot.pv_w,
         "grid": snapshot.grid_w,
@@ -437,8 +407,6 @@ def build_flow_figure(
         d = None if node == "grid" and grid_off else flow_direction(node, w)
         _draw_connection(ax, node, w, peak, d)
         _draw_node(ax, renderer, node, snapshot, lang, w, d, runtime, grid_off, tz, now)
-    if runtime is not None:
-        _draw_eta(ax, renderer, *eta_lines(runtime, lang, tz, now))
     _draw_hub(ax)
     text, stale = _footer(snapshot, lang, tz, now, stale_after_min, checked_at)
     ax.text(

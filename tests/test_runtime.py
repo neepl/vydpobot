@@ -434,12 +434,12 @@ def test_flow_text_clear_with_runtime(lang, rt):
     s = snap(ts=NOW - timedelta(minutes=2))
     boxes = _text_boxes(s, lang, runtime=rt, grid_off=True)
     texts = [b[0] for b in boxes]
-    assert any(("grid off" if lang == "en" else "немає мережі") == x for x in texts)
+    assert not any(x in ("grid off", "немає мережі") for x in texts)  # value alone says it
+    joined = " ".join(texts)
     if rt is not None:
-        joined = " ".join(texts)
-        main, until = ("≈ 5 h 20 min", "until") if lang == "en" else ("≈ 5 год 20 хв", "до")
-        assert main in texts and until in joined
-        assert ("03:10" if rt is not RT else "23:40") in joined
+        eta = "≈ 5 h 20 min" if lang == "en" else "≈ 5 год 20 хв"
+        assert eta in joined
+        assert "until" not in joined and " до " not in f" {joined} "  # no end time in the image
     segs = [
         seg for node in CORNERS for seg in zip(node_path(node), node_path(node)[1:], strict=False)
     ]
@@ -452,33 +452,26 @@ def test_flow_text_clear_with_runtime(lang, rt):
 
 
 @pytest.mark.parametrize("lang", ["en", "uk"])
-def test_flow_eta_block_next_to_battery(lang):
-    from vydpobot.flow import ETA_MAIN_Y, ETA_UNTIL_Y
-
+def test_flow_eta_is_second_battery_subline(lang):
     s = snap(ts=NOW - timedelta(minutes=2))
     state = "discharging" if lang == "en" else "розряджається"
-    dur, until, over = (
-        ("5 h 20 min", "until", "> 72 h") if lang == "en" else ("5 год 20 хв", "до", "> 72 год")
-    )
+    dur, over = ("5 h 20 min", "> 72 h") if lang == "en" else ("5 год 20 хв", "> 72 год")
     far = replace(RT, ends_at=NOW + timedelta(hours=25))
     capd = Runtime(72.0, NOW + timedelta(hours=72), 0.1, "current", capped=True)
-    for rt, main, sub in [
-        (RT, f"≈ {dur}", f"{until} 23:40"),
-        (replace(RT, ends_at=END + timedelta(hours=3, minutes=30)), f"≈ {dur}", f"{until} 03:10"),
-        (far, f"≈ {dur}", f"{until} 11.10 20:00"),
-        (capd, over, None),
-    ]:
-        fig, ax = build_flow_figure(s, lang=lang, tz=TZ, now=NOW, runtime=rt, grid_off=True)
-        by_text = {x.get_text(): x for x in ax.texts}
-        assert state in by_text  # battery sub-line stays one plain line
-        m = by_text[main]
-        assert m.get_fontweight() == "bold" and m.get_fontsize() >= 11
-        x, y = m.get_position()
-        assert y == ETA_MAIN_Y and x < 1  # left column, above the battery value
-        if sub:
-            assert by_text[sub].get_position()[1] == ETA_UNTIL_Y
+    for rt, eta in [(RT, f"≈ {dur}"), (far, f"≈ {dur}"), (capd, over)]:
+        _, ax = build_flow_figure(s, lang=lang, tz=TZ, now=NOW, runtime=rt, grid_off=True)
+        sub = next(x for x in ax.texts if x.get_text() == f"{state}\n{eta}")
+        assert sub.get_fontweight() == "normal" and sub.get_fontsize() <= 11  # small, muted
     _, ax = build_flow_figure(s, lang=lang, tz=TZ, now=NOW, grid_off=True)
-    assert not any(x.get_text().startswith("≈ ") for x in ax.texts)
+    assert any(x.get_text() == state for x in ax.texts)  # no runtime: state alone
+    assert not any("≈ " in x.get_text() for x in ax.texts)
+
+
+def test_flow_bottom_values_aligned():
+    s = snap(ts=NOW - timedelta(minutes=2))
+    _, ax = build_flow_figure(s, lang="en", tz=TZ, now=NOW, runtime=RT, grid_off=True)
+    bold_bottom = [x for x in ax.texts if x.get_fontweight() == "bold" and x.get_position()[1] < 4]
+    assert len(bold_bottom) == 2 and len({x.get_position()[1] for x in bold_bottom}) == 1
 
 
 @pytest.mark.parametrize("lang", ["en", "uk"])
@@ -497,8 +490,11 @@ def test_flow_grid_off_value_and_cross(lang):
         else:
             assert not values and not reds
     _, ax = build_flow_figure(s, lang=lang, tz=TZ, now=NOW, runtime=RT, grid_off=True)
-    sub = "grid off" if lang == "en" else "немає мережі"
-    assert any(x.get_text() == sub for x in ax.texts)
+    assert not any(x.get_text() in ("grid off", "немає мережі") for x in ax.texts)
+    # sunny outage: no discharge, but the inverter sees no grid voltage -> same red value
+    sunny = replace(s, grid_online=False)
+    _, ax = build_flow_figure(sunny, lang=lang, tz=TZ, now=NOW)
+    assert [x.get_color() for x in ax.texts if x.get_text() == word] == [C_THR]
 
 
 def test_flow_grid_off_connection_stays_grey():
