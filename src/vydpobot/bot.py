@@ -431,9 +431,14 @@ def format_equipment_event(event: EquipEvent, lang: Lang, tz: ZoneInfo, now: dat
     return f"🟢 {html.escape(t(lang, 'equip.recovered', name=name, duration=dur))}"
 
 
+def _utcnow() -> datetime:
+    """Current time; a module-level seam so tests can pin the clock."""
+    return datetime.now(UTC)
+
+
 def format_health(result: FetchResult, fetched_at: datetime, lang: Lang, tz: ZoneInfo) -> str:
     """HTML body of /health: one line per configured entry, then the 'checked' footer."""
-    now = datetime.now(UTC)
+    now = _utcnow()
     lines = [f"<b>{html.escape(t(lang, 'health.title'))}</b>", ""]
     for entry, c in result.items:
         emoji, name = _equip_label(entry, c)
@@ -871,8 +876,12 @@ async def _pin(bot: Any, chat_id: int, message_id: int) -> bool:
 
 async def _send_live(bot: Any, chat_id: int, png: bytes, caption: str) -> tuple[int, bool]:
     """Send the live photo and pin it. Returns (message_id, pinned)."""
-    msg = await bot.send_photo(
-        chat_id=chat_id, photo=png, caption=caption, parse_mode=ParseMode.HTML
+    msg = await bot.send_photo(  # silent: the live message is ambient, not news
+        chat_id=chat_id,
+        photo=png,
+        caption=caption,
+        parse_mode=ParseMode.HTML,
+        disable_notification=True,
     )
     return msg.message_id, await _pin(bot, chat_id, msg.message_id)
 

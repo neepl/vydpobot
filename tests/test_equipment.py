@@ -522,7 +522,8 @@ async def test_health_lines(env):
     assert env.bd["equipment"].calls == 0
 
 
-async def test_health_uk_and_escaping(env):
+async def test_health_uk_and_escaping(env, monkeypatch):
+    monkeypatch.setattr(bot_mod, "_utcnow", lambda: NOW)  # same day as the pings
     env.bd["equipment"] = FakeMonitor()
     env.bd["equipment_cache"] = (result(chk("A&B", "up", last=NOW)), NOW)
     text = await health(env, "uk")

@@ -105,7 +105,7 @@ class Settings(BaseSettings):
 
     # --- Scheduled jobs (HH:MM in TIMEZONE; empty = disabled) ---
     # A fresh pinned live message every day: the old one is deleted at this time.
-    live_reset_time: str | None = "00:00"
+    live_reset_time: str | None = "09:00"
     # Previous month's chart and statistics, posted to ALERT_CHAT_ID on the 1st (OpenAPI only).
     monthly_report_time: str | None = "09:00"
 

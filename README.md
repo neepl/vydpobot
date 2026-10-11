@@ -509,13 +509,15 @@ The first caption line is what Telegram shows in the pinned bar:
 
 ## Daily fresh live message
 
-By default (`LIVE_RESET_TIME=00:00`, local `TIMEZONE`) the bot replaces every live message with a
+By default (`LIVE_RESET_TIME=09:00`, local `TIMEZONE`) the bot replaces every live message with a
 new one once a day: it deletes the old message, sends a new photo with the current caption and
-image (from the latest stored data, no API call), pins it silently and remembers its creation time.
+image (from the latest stored data, no API call), pins it and remembers its creation time. Both
+the new message and the pin are sent **silently** (`disable_notification`), so nobody gets a
+notification sound; it just appears in the chat.
 This keeps the pinned message fresh and recent in the chat.
 
 - The check runs in a daily job at that time and at the start of every live refresh, so a bot that
-  was down at midnight resets on its first refresh after the start (3 s after startup).
+  was down at the reset time resets on its first refresh after the start (3 s after startup).
 - Telegram only lets a bot delete messages younger than 48 hours. The daily reset stays well inside
   that limit. If the delete still fails, the bot unpins the old message instead and the new one is
   pinned anyway.

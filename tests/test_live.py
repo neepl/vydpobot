@@ -133,6 +133,7 @@ class FakeBot:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
         self.photos: list[tuple[int, str]] = []
+        self.photo_silent: list[Any] = []
         self.edits: list[tuple[int, int, str]] = []
         self.pins: list[tuple[int, int, Any]] = []
         self.unpins: list[tuple[int, int]] = []
@@ -146,11 +147,12 @@ class FakeBot:
     async def send_message(self, chat_id: int, text: str, **_: Any) -> None:
         self.sent.append((chat_id, text))
 
-    async def send_photo(self, chat_id: int, photo: bytes, caption: str = "", **_: Any):
+    async def send_photo(self, chat_id: int, photo: bytes, caption: str = "", **kw: Any):
         assert photo.startswith(PNG)
         self.next_id += 1
         self.calls.append("send_photo")
         self.photos.append((chat_id, caption))
+        self.photo_silent.append(kw.get("disable_notification"))
         return SimpleNamespace(message_id=self.next_id)
 
     async def pin_chat_message(self, chat_id: int, message_id: int, **kw: Any) -> None:
@@ -673,7 +675,7 @@ def test_settings_reset_time_validation():
     base = {"telegram_token": "x", "alert_chat_id": 1, "solarman_backend": "openapi",
             "solarman_app_id": "a", "solarman_app_secret": "b", "solarman_email": "c",
             "solarman_password": "d", "_env_file": None}  # fmt: skip
-    assert Settings(**base).live_reset_time == "00:00"
+    assert Settings(**base).live_reset_time == "09:00"
     assert Settings(**base, live_reset_time="6:05").live_reset_time == "06:05"
     assert Settings(**base, live_reset_time="").live_reset_time is None
     assert Settings(**base, monthly_report_time=" ").monthly_report_time is None
@@ -681,3 +683,10 @@ def test_settings_reset_time_validation():
         Settings(**base, live_reset_time="25:00")
     with pytest.raises(ValueError):
         Settings(**base, monthly_report_time="9am")
+
+
+async def test_live_message_and_pin_are_silent(env):
+    prime(env)
+    await run_cmd(env, [])
+    assert env.bot.photo_silent == [True]
+    assert all(p[2] is True for p in env.bot.pins)
