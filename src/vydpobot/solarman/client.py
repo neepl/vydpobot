@@ -100,10 +100,12 @@ def _ts(v: object, tz: ZoneInfo) -> datetime:
 def _station_grid(raw: dict) -> float | None:
     """Grid power, + = import. Verified on real OpenAPI data (2026-10-10): purchasePower is the
     import, gridPower the export (null when not exporting) and wirePower only the grid-line
-    magnitude, so it is never used."""
+    magnitude, so it never decides the direction. During an outage (real data, 2026-10-11) both
+    purchasePower and gridPower are null and wirePower is 0: a zero magnitude means no flow."""
     buy, sell = _num(raw.get("purchasePower")), _num(raw.get("gridPower"))
     if buy is None and sell is None:
-        return None
+        wire = _num(raw.get("wirePower"))
+        return 0.0 if wire is not None and abs(wire) < 1 else None
     return (buy or 0.0) - (sell or 0.0)
 
 

@@ -493,8 +493,8 @@ def test_real_outage_station_and_inverter():
     from vydpobot.solarman.client import snapshot_from_station
 
     s = snapshot_from_station(fx("openapi_station_realtime_outage_real"), TZ)
-    # purchasePower and gridPower are null during the outage
-    assert s.grid_w is None
+    # purchasePower and gridPower are null during the outage, wirePower 0: no flow
+    assert s.grid_w == 0.0
     assert s.battery_w == -6570.0 and s.battery_state == BatteryState.DISCHARGING
     online, volts, status = grid_state_from_device(fx("openapi_device_current_outage_real"))
     assert online is False and volts == (0.0, 0.0, 0.0) and status == "Static"
@@ -519,3 +519,27 @@ def test_relay_break_is_offline_fallback_without_voltage():
     assert grid_state_from_device(device(GRID_RELAY_ST1=""))[0] is None
     # voltage wins over the relay text when present
     assert grid_state_from_device(device(G_V_L1="226.00", GRID_RELAY_ST1="Break"))[0] is True
+
+
+def test_outage_station_without_device_sn_reads_grid_as_idle():
+    from vydpobot.runtime import on_battery
+    from vydpobot.solarman.client import snapshot_from_station
+
+    raw = fx("openapi_station_realtime_outage_real")  # purchase/grid null, wirePower 0
+    s = snapshot_from_station(raw, TZ)
+    assert s.grid_w == 0.0 and on_battery(s)  # power-flow fallback can now see the outage
+    raw = {**raw, "wirePower": 1500.0}  # magnitude without a direction stays unknown
+    assert snapshot_from_station(raw, TZ).grid_w is None
+
+
+def test_device_sn_warning():
+    from types import SimpleNamespace
+
+    from vydpobot.bot import device_sn_warning
+
+    warn = device_sn_warning(SimpleNamespace(solarman_backend="openapi", solarman_device_sn=None))
+    assert warn and "SOLARMAN_DEVICE_SN" in warn
+    ok = SimpleNamespace(solarman_backend="openapi", solarman_device_sn="X")
+    assert device_sn_warning(ok) is None
+    portal = SimpleNamespace(solarman_backend="portal", solarman_device_sn=None)
+    assert device_sn_warning(portal) is None

@@ -584,6 +584,19 @@ def _log_quota_plan(settings: Settings) -> None:
             )
     if warning := quota_warning(settings):
         log.warning(warning)
+    if warning := device_sn_warning(settings):
+        log.warning(warning)
+
+
+def device_sn_warning(settings: Settings) -> str | None:
+    """OpenAPI without an inverter SN: outages are only inferred from power flows."""
+    if getattr(settings, "solarman_backend", None) != "openapi" or settings.solarman_device_sn:
+        return None
+    return (
+        "SOLARMAN_DEVICE_SN is not set: grid outages are only inferred from power flows. Set it "
+        "to the master inverter's serial (see `vydpobot discover`) for exact grid-off detection "
+        "from the inverter's grid voltage."
+    )
 
 
 BALANCE_RETRY_AFTER = timedelta(days=7)
