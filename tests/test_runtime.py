@@ -681,7 +681,7 @@ async def test_refresh_live_during_outage(env, monkeypatch):
     fb = FakeBot()
     await bot.refresh_live(fb, env.bd, cur)
     assert len(fb.edits) == 1
-    assert "⏳ Battery lasts" in fb.edits[0][2] and "Grid: off" in fb.edits[0][2]
+    assert "⏳ Battery lasts" in fb.edits[0][2] and "Grid off since" in fb.edits[0][2]
     assert isinstance(seen["runtime"], Runtime) and seen["grid_off"] is True
 
     # no outage: nothing extra
@@ -736,3 +736,75 @@ async def test_status_and_graph_pass_runtime(env, monkeypatch):
     await bot.cmd_graph(update, ctx)
     assert isinstance(seen["chart"]["runtime"], Runtime)
     assert seen["chart"]["shutdown_soc"] == 10.0 and seen["chart"]["soc_now"] == 60.0
+
+
+# ------------------------------------------------------------------ outage start ("since")
+
+
+def _outage_bd(tmp_path, samples):
+    from types import SimpleNamespace
+
+    from vydpobot.storage import Storage
+
+    st = Storage(tmp_path / "o.sqlite3")
+    for p in samples:
+        st.add_sample(p)
+    return {"storage": st, "settings": SimpleNamespace(tz=TZ)}
+
+
+def _sample(ts, grid, bat=-4500.0):
+    state = BatteryState.DISCHARGING if bat < -50 else BatteryState.IDLE
+    return Snapshot(ts, 60.0, 0.0, 4500.0, grid, bat, state)
+
+
+def test_outage_since_walks_back_to_first_reading_without_grid_flow(tmp_path):
+    from vydpobot.bot import outage_since_for
+    from vydpobot.storage import KEY_OUTAGE_SINCE
+
+    t0 = NOW - timedelta(minutes=60)
+    samples = [_sample(t0 - timedelta(minutes=5), 3000.0)]  # on grid, importing
+    samples += [_sample(t0 + timedelta(minutes=5 * i), None if i < 3 else 0.0) for i in range(12)]
+    bd = _outage_bd(tmp_path, samples)
+    snap = replace(_sample(NOW, 0.0), grid_online=False)
+    assert outage_since_for(bd, snap, NOW, True) == t0  # null readings count as "no flow"
+    assert bd["storage"].get_json(KEY_OUTAGE_SINCE) == t0.isoformat()  # persisted
+    # a data gap (no snapshot) or stale data keeps the stored start
+    assert outage_since_for(bd, None, NOW + timedelta(hours=1), False) is None
+    assert bd["storage"].get_json(KEY_OUTAGE_SINCE) == t0.isoformat()
+    assert outage_since_for(bd, snap, NOW + timedelta(hours=1), True) == t0
+    # grid flowing again clears it
+    back = _sample(NOW + timedelta(hours=2), 2500.0, bat=3000.0)
+    assert outage_since_for(bd, back, NOW + timedelta(hours=2), False) is None
+    assert bd["storage"].get_json(KEY_OUTAGE_SINCE) is None
+    bd["storage"].close()
+
+
+def test_outage_since_chain_breaks_on_gap(tmp_path):
+    from vydpobot.bot import outage_since_for
+
+    old = _sample(NOW - timedelta(hours=3), 0.0)  # older idle reading, 2 h 20 min gap
+    recent = [_sample(NOW - timedelta(minutes=40 - 5 * i), 0.0) for i in range(8)]
+    bd = _outage_bd(tmp_path, [old, *recent])
+    snap = replace(_sample(NOW, 0.0), grid_online=False)
+    assert outage_since_for(bd, snap, NOW, True) == NOW - timedelta(minutes=40)
+    bd["storage"].close()
+
+
+@pytest.mark.parametrize("lang", ["en", "uk"])
+def test_status_line_shows_outage_since(lang):
+    from vydpobot.bot import format_status
+    from vydpobot.i18n import t
+
+    since = NOW - timedelta(hours=1, minutes=30)
+    s = replace(snap(ts=NOW - timedelta(minutes=1)), grid_online=False)
+    text = format_status(s, lang, TZ, NOW, runtime=RT, grid_off=True, outage_since=since)
+    when = since.astimezone(TZ).strftime("%H:%M")
+    want = (
+        f"Grid off since {when} (1 h 30 min)"
+        if lang == "en"
+        else f"Немає світла з {when} (1 год 30 хв)"
+    )
+    assert f"🔌 {want}" in text
+    # without a known start the old wording stays
+    plain = format_status(s, lang, TZ, NOW, runtime=RT, grid_off=True)
+    assert t(lang, "runtime.grid_off") in plain

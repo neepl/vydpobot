@@ -128,6 +128,7 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "runtime.lasts": "⏳ Battery lasts ≈ {dur} (until {when})",
         "runtime.capped": "⏳ Battery lasts > 72 h",
         "runtime.grid_off": "Grid: off (running on battery)",
+        "runtime.grid_off_since": "Grid off since {time} ({dur})",
         "status.grid_down": "Grid: off",
         "quota.notice": (
             "Solarman API usage: {count} of {budget} calls today. "
@@ -294,6 +295,7 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "runtime.lasts": "⏳ Батареї вистачить ≈ на {dur} (до {when})",
         "runtime.capped": "⏳ Батареї вистачить > 72 год",
         "runtime.grid_off": "Мережа: немає (працюємо від батареї)",
+        "runtime.grid_off_since": "Немає світла з {time} ({dur})",
         "status.grid_down": "Мережа: немає",
         "quota.notice": (
             "Використання API Solarman: {count} з {budget} запитів сьогодні. "

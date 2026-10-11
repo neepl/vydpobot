@@ -77,6 +77,7 @@ from vydpobot.storage import (
     KEY_LANGUAGE,
     KEY_LIVE_MESSAGES,
     KEY_MONTH_REPORTED,
+    KEY_OUTAGE_SINCE,
     KEY_PORTAL_AUTH_NOTIFIED,
     KEY_THRESHOLD,
     Storage,
@@ -166,6 +167,7 @@ def _status_lines(
     grid_off: bool = False,
     tz: ZoneInfo | None = None,
     now: datetime | None = None,
+    outage_since: datetime | None = None,
 ) -> list[str]:
     """Title through SOC bar of the status message (shared by /status and the live caption)."""
     na = t(lang, "status.na")
@@ -184,7 +186,12 @@ def _status_lines(
     else:
         state = t(lang, "status.state.unknown")
 
-    if grid_off or runtime is not None:
+    off = grid_off or runtime is not None or s.grid_online is False
+    if off and outage_since is not None and tz is not None and now is not None:
+        hours = max(0.0, (now - outage_since).total_seconds() / 3600)
+        when = _local(outage_since, tz, now)
+        grid = t(lang, "runtime.grid_off_since", time=when, dur=fmt_hm(lang, hours))
+    elif grid_off or runtime is not None:
         grid = t(lang, "runtime.grid_off")
     elif s.grid_online is False:
         grid = t(lang, "status.grid_down")  # grid absent but the battery is not carrying the house
@@ -232,11 +239,12 @@ def format_status(
     stale_after_min: int = 30,
     runtime: Runtime | None = None,
     grid_off: bool = False,
+    outage_since: datetime | None = None,
 ) -> str:
     """Build the HTML /status message from a snapshot."""
     s = snapshot
     age = max(0.0, (now - s.ts).total_seconds())
-    lines = _status_lines(s, lang, threshold, runtime, grid_off, tz, now)
+    lines = _status_lines(s, lang, threshold, runtime, grid_off, tz, now, outage_since)
     lines += [
         "",
         html.escape(t(lang, "status.updated", time=_local(s.ts, tz, now), ago=fmt_ago(lang, age))),
@@ -312,6 +320,7 @@ def format_live_caption(
     equipment: FetchResult | None = None,
     runtime: Runtime | None = None,
     grid_off: bool = False,
+    outage_since: datetime | None = None,
 ) -> str:
     """HTML caption of the pinned live-status photo: summary, details, update time."""
     s = snapshot
@@ -319,7 +328,7 @@ def format_live_caption(
     stale = _is_stale(age, stale_after_min)
     when = s.ts.astimezone(tz).strftime("%d.%m.%Y %H:%M")
     lines = [format_live_summary(s, lang, tz, now, stale, runtime, grid_off), ""]
-    lines += _status_lines(s, lang, threshold, runtime, grid_off, tz, now)
+    lines += _status_lines(s, lang, threshold, runtime, grid_off, tz, now, outage_since)
     check = now.astimezone(tz).strftime("%H:%M")
     tail = ["", html.escape(t(lang, "live.updated", data_time=when, check_time=check))]
     if stale:
@@ -510,6 +519,55 @@ def runtime_context(
     except Exception:
         log.exception("Runtime estimate failed")
         return False, None
+
+
+OUTAGE_CHAIN_GAP = timedelta(minutes=20)  # stored samples further apart break the outage chain
+
+
+def _grid_back(snap: Snapshot | None) -> bool:
+    """Positive evidence of grid power: the inverter sees it, or power flows on the grid line."""
+    if snap is None:
+        return False
+    flowing = snap.grid_w is not None and abs(snap.grid_w) >= GRID_IDLE_W
+    return snap.grid_online is True or flowing
+
+
+def outage_since_for(
+    bd: dict[str, Any], snap: Snapshot | None, now: datetime, active: bool
+) -> datetime | None:
+    """Start of the current grid outage, or None. Never raises.
+
+    Persisted on first detection. The start is found by walking back through stored samples
+    without grid flow, so a restart in the middle of an outage keeps the real start. It is cleared
+    only on evidence that the grid is back (online flag or power on the grid line), so a data gap
+    does not reset it.
+    """
+    try:
+        storage: Storage = bd["storage"]
+        off = active or (snap is not None and snap.grid_online is False)
+        if not off:
+            if _grid_back(snap) and storage.get_json(KEY_OUTAGE_SINCE):
+                storage.set_json(KEY_OUTAGE_SINCE, None)
+                log.info("Grid is back")
+            return None
+        if stored := storage.get_json(KEY_OUTAGE_SINCE):
+            return datetime.fromisoformat(stored)
+        assert snap is not None
+        start = snap.ts
+        for p in reversed(storage.samples_between(snap.ts - timedelta(hours=48), snap.ts)):
+            if p.ts >= start:
+                continue
+            if start - p.ts > OUTAGE_CHAIN_GAP or (
+                p.grid_w is not None and abs(p.grid_w) >= GRID_IDLE_W
+            ):
+                break
+            start = p.ts
+        storage.set_json(KEY_OUTAGE_SINCE, start.isoformat())
+        log.info("Grid outage since %s", start.isoformat())
+        return start
+    except Exception:
+        log.exception("Outage start failed")
+        return None
 
 
 def runtime_for(bd: dict[str, Any], snap: Snapshot | None, now: datetime) -> Runtime | None:
@@ -924,6 +982,7 @@ def _live_caption(
         equipment=cache[0] if cache else None,
         runtime=runtime,
         grid_off=grid_off,
+        outage_since=outage_since_for(bd, snap, now, grid_off),
     )
 
 
@@ -1108,6 +1167,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         settings.stale_after_min,
         runtime=runtime,
         grid_off=grid_off,
+        outage_since=outage_since_for(bd, snap, now, grid_off),
     )
     message = update.effective_message
     if message is not None:

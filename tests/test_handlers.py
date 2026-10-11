@@ -343,7 +343,7 @@ async def test_status_prefers_cached_poll_snapshot(make_env) -> None:
         datetime.now(UTC), 77, 1, 2, 0, 0, BatteryState.IDLE, grid_online=False
     )
     (reply,) = await env.run(bot_mod.cmd_status, [])
-    assert "77%" in reply.text and t("en", "status.grid_down") in reply.text
+    assert "77%" in reply.text and "Grid off since" in reply.text
     assert env.source.snapshot_calls == 0
 
 

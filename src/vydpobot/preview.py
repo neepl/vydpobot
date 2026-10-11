@@ -252,6 +252,7 @@ async def _run(
                 settings.stale_after_min,
                 runtime=rt,
                 grid_off=grid_off,
+                outage_since=bot.outage_since_for(bd, snap, now, grid_off),
             )
             sections.append(("STATUS (/status)", strip_html(status)))
             png = await asyncio.to_thread(

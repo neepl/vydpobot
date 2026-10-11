@@ -26,6 +26,7 @@ KEY_PORTAL_REFRESH_TOKEN = "portal_refresh_token"  # rotated refresh token (secr
 KEY_PORTAL_ACCESS = "portal_access"  # {"access", "expires_at"} shared between processes (secret)
 KEY_PORTAL_BOOTSTRAP_SHA = "portal_bootstrap_sha"  # sha256 of the last-seen env bootstrap token
 KEY_PORTAL_AUTH_NOTIFIED = "portal_auth_notified"  # admins already told the token was rejected
+KEY_OUTAGE_SINCE = "outage_since"  # ISO start of the current grid outage, None when online
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS samples(
