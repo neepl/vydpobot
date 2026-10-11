@@ -1,0 +1,18 @@
+{
+ "irradiateIntensity": null,
+ "generationTotal": 6181.2,
+ "gridPower": null,
+ "dischargePower": 6570.0,
+ "lastUpdateTime": 1791735490,
+ "usePower": 6402.0,
+ "wirePower": 0.0,
+ "batterySoc": 91.0,
+ "generationPower": 0.0,
+ "purchasePower": null,
+ "chargePower": 0.0,
+ "batteryPower": 6570.0,
+ "requestId": "45e688fd79b11f5b18f4dcf9b9399f80",
+ "code": null,
+ "msg": null,
+ "success": true
+}

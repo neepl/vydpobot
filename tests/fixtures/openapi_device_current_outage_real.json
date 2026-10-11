@@ -1,0 +1,105 @@
+{
+ "deviceSn": "INV0000001",
+ "deviceType": "INVERTER",
+ "deviceState": 1,
+ "collectionTime": 1791735311,
+ "dataList": [
+  {
+   "key": "P_INF",
+   "value": "M1",
+   "name": "P_INF",
+   "unit": null
+  },
+  {
+   "key": "INV_O_P_T",
+   "value": "5006",
+   "name": "INV_O_P_T",
+   "unit": null
+  },
+  {
+   "key": "S_P_T",
+   "value": "0.00",
+   "name": "S_P_T",
+   "unit": null
+  },
+  {
+   "key": "G_V_L1",
+   "value": "0.00",
+   "name": "G_V_L1",
+   "unit": null
+  },
+  {
+   "key": "G_V_L2",
+   "value": "0.00",
+   "name": "G_V_L2",
+   "unit": null
+  },
+  {
+   "key": "G_V_L3",
+   "value": "0.00",
+   "name": "G_V_L3",
+   "unit": null
+  },
+  {
+   "key": "ST_PG1",
+   "value": "Static",
+   "name": "ST_PG1",
+   "unit": null
+  },
+  {
+   "key": "PG_F1",
+   "value": "0.00",
+   "name": "PG_F1",
+   "unit": null
+  },
+  {
+   "key": "PG_Pt1",
+   "value": "0",
+   "name": "PG_Pt1",
+   "unit": null
+  },
+  {
+   "key": "C_V_L1",
+   "value": "229.40",
+   "name": "C_V_L1",
+   "unit": null
+  },
+  {
+   "key": "E_Puse_t1",
+   "value": "5006",
+   "name": "E_Puse_t1",
+   "unit": null
+  },
+  {
+   "key": "L_F",
+   "value": "50.00",
+   "name": "L_F",
+   "unit": null
+  },
+  {
+   "key": "B_ST1",
+   "value": "Discharging",
+   "name": "B_ST1",
+   "unit": null
+  },
+  {
+   "key": "B_P1",
+   "value": "5015",
+   "name": "B_P1",
+   "unit": null
+  },
+  {
+   "key": "B_left_cap1",
+   "value": "91",
+   "name": "B_left_cap1",
+   "unit": null
+  },
+  {
+   "key": "GRID_RELAY_ST1",
+   "value": "Break",
+   "name": "GRID_RELAY_ST1",
+   "unit": null
+  }
+ ],
+ "success": true
+}

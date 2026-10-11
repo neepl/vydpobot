@@ -484,3 +484,38 @@ async def test_balance_api_locked_raises_unavailable(respx_mock, clock):
     with pytest.raises(BalanceUnavailable):
         await c.balance()
     await c.aclose()
+
+
+# ------------------------------------------------- real outage (2026-10-11, 19:18 local)
+
+
+def test_real_outage_station_and_inverter():
+    from vydpobot.solarman.client import snapshot_from_station
+
+    s = snapshot_from_station(fx("openapi_station_realtime_outage_real"), TZ)
+    # purchasePower and gridPower are null during the outage
+    assert s.grid_w is None
+    assert s.battery_w == -6570.0 and s.battery_state == BatteryState.DISCHARGING
+    online, volts, status = grid_state_from_device(fx("openapi_device_current_outage_real"))
+    assert online is False and volts == (0.0, 0.0, 0.0) and status == "Static"
+
+
+@respx.mock(assert_all_called=False)
+async def test_real_outage_snapshot_reports_grid_off(respx_mock, clock):
+    _, cur = routes(
+        respx_mock,
+        station=fx("openapi_station_realtime_outage_real"),
+        dev=fx("openapi_device_current_outage_real"),
+    )
+    c = make_client(device_poll_s=0)
+    s = await c.get_snapshot(1, SN)
+    assert cur.call_count == 1
+    assert s.grid_online is False and s.grid_w == 0.0 and s.grid_voltage_v == (0.0, 0.0, 0.0)
+    await c.aclose()
+
+
+def test_relay_break_is_offline_fallback_without_voltage():
+    assert grid_state_from_device(device(GRID_RELAY_ST1="Break"))[0] is False
+    assert grid_state_from_device(device(GRID_RELAY_ST1=""))[0] is None
+    # voltage wins over the relay text when present
+    assert grid_state_from_device(device(G_V_L1="226.00", GRID_RELAY_ST1="Break"))[0] is True

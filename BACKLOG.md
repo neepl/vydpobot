@@ -13,8 +13,9 @@ Ideas and follow-ups that are deliberately not done yet.
   battery voltage. All of these are already in M1's device data, which is fetched on demand.
 
 ## Verification after real-world data
-- **The grid-off vocabulary.** Check `ST_PG1` and the portal `wireStatus` values logged during
-  the first real outage, and whether `GRID_RELAY_ST1` ever gets filled.
+- ~~**The grid-off vocabulary.**~~ Learned from a real outage on 2026-10-11: the station
+  `purchasePower`/`gridPower` are `null` and `wirePower` is 0. On M1, `G_V_L1..3` and `PG_F1` are
+  0, `ST_PG1` is `Static`, and `GRID_RELAY_ST1` is `Break`. All of this is handled now.
 - **History sign convention.** Check that the `station/v1.0/history` 5-minute frames use the
   same signs as `realTime` (run `vydpobot dump --history` while charging).
 - **Learned battery capacity.** Compare it with the bank's nameplate value: expected about

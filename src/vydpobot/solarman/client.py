@@ -48,7 +48,9 @@ GRID_KEYS: dict[str, tuple[str, ...]] = {
     "voltage_single": ("G_V_L",),  # used only when no per-phase key is present
     "frequency": ("PG_F1",),
     "status": ("ST_PG1",),
+    "relay": ("GRID_RELAY_ST1",),  # "Break" during a real outage (2026-10-11), empty otherwise
 }
+GRID_RELAY_OPEN = ("break", "open", "off")
 GRID_V_ON = 100.0  # any phase above this -> grid present
 GRID_V_OFF = 50.0  # all phases below this (and frequency ~0) -> grid absent
 GRID_F_ON = 40.0
@@ -182,7 +184,15 @@ def grid_state_from_device(
         and (freq is None or freq < GRID_F_OFF)
     ):
         online = False
+    if online is None:  # no usable voltage/frequency: fall back to the grid relay state
+        relay = str(_first_raw(values, GRID_KEYS["relay"]) or "").strip().lower()
+        if relay in GRID_RELAY_OPEN:
+            online = False
     return online, tuple(volts) or None, status
+
+
+def _first_raw(values: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    return next((values[k] for k in keys if values.get(k) not in (None, "")), None)
 
 
 def history_from_station(
