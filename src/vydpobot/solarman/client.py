@@ -524,15 +524,17 @@ class SolarmanClient:
             return station
         if self._on_demand:
             grid = station.grid_w
-            if grid is None:
-                return replace(station, grid_online=None, grid_voltage_v=None)
-            if abs(grid) >= GRID_IDLE_W:
+            if grid is not None and abs(grid) >= GRID_IDLE_W:
                 # power flows through the grid line, so it is online; drop any offline state
                 self._grid_cache = None
                 return replace(station, grid_online=True, grid_voltage_v=None)
+            # idle OR missing grid value (Solarman sends nulls during outages): ask the inverter
         await self._maybe_poll_device(device_sn, station)
         online, volts = self._grid_state()
-        return replace(station, grid_online=online, grid_voltage_v=volts)
+        grid_w = station.grid_w
+        if online is False and grid_w is None:
+            grid_w = 0.0  # inverter confirms no grid voltage: nothing can flow
+        return replace(station, grid_w=grid_w, grid_online=online, grid_voltage_v=volts)
 
     def _grid_state(self) -> tuple[bool | None, tuple[float, ...] | None]:
         """Cached grid state while fresher than 2x the poll period, else (None, None)."""
@@ -549,7 +551,7 @@ class SolarmanClient:
             return  # non-essential call; skipped at 100% of the daily budget
         last = self._grid_attempt_at
         if self._on_demand:
-            # only called with an idle grid line (see get_snapshot)
+            # only called with an idle or unknown grid line (see get_snapshot)
             if last is not None and now - last < OUTAGE_REFRESH_S:
                 return
         elif last is None or now - last >= self._device_poll_s:

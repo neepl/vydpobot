@@ -394,11 +394,23 @@ async def test_on_demand_grid_returns_without_device_call(respx_mock, clock):
 
 
 @respx.mock(assert_all_called=False)
-async def test_on_demand_grid_unknown_no_call(respx_mock, clock):
-    _, cur = routes(respx_mock, station=NO_GRID)
+async def test_on_demand_grid_unknown_asks_inverter_outage(respx_mock, clock):
+    # Solarman sends null grid fields during an outage: the inverter's 0 V decides.
+    _, cur = routes(respx_mock, station=NO_GRID, dev=outage_device())
     c = make_client(device_poll_s=0)
     s = await c.get_snapshot(1, SN)
-    assert s.grid_w is None and s.grid_online is None and cur.call_count == 0
+    assert cur.call_count == 1
+    assert s.grid_online is False and s.grid_w == 0.0  # confirmed off: nothing flows
+    await c.aclose()
+
+
+@respx.mock(assert_all_called=False)
+async def test_on_demand_grid_unknown_inverter_online(respx_mock, clock):
+    _, cur = routes(respx_mock, station=NO_GRID)  # default device data: grid at ~225 V
+    c = make_client(device_poll_s=0)
+    s = await c.get_snapshot(1, SN)
+    assert cur.call_count == 1
+    assert s.grid_online is True and s.grid_w is None  # online, but the value stays unknown
     await c.aclose()
 
 
