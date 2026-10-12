@@ -106,6 +106,10 @@ class Settings(BaseSettings):
     # --- Scheduled jobs (HH:MM in TIMEZONE; empty = disabled) ---
     # A fresh pinned live message every day: the old one is deleted at this time.
     live_reset_time: str | None = "09:00"
+    # How often the pinned live message is replaced by a new one (each replacement shows up as a
+    # new message in the chat): monthly = 1st of the month at LIVE_RESET_TIME, daily, or off.
+    # A deleted live message is always re-created on the next refresh.
+    live_reset_period: Literal["monthly", "daily", "off"] = "monthly"
     # Previous month's chart and statistics, posted to ALERT_CHAT_ID on the 1st (OpenAPI only).
     monthly_report_time: str | None = "09:00"
 

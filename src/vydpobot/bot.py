@@ -927,10 +927,25 @@ def reset_boundary(now: datetime, tz: ZoneInfo, reset_time: time) -> datetime:
     raise AssertionError("unreachable")
 
 
+def monthly_boundary(now: datetime, tz: ZoneInfo, reset_time: time) -> datetime:
+    """The most recent 1st-of-month at `reset_time` (local) that is <= now (aware, in `tz`)."""
+    first = now.astimezone(tz).date().replace(day=1)
+    boundary = datetime.combine(first, reset_time, tzinfo=tz)
+    if boundary.astimezone(UTC) <= now:
+        return boundary
+    prev = (first - timedelta(days=1)).replace(day=1)
+    return datetime.combine(prev, reset_time, tzinfo=tz)
+
+
 def _live_boundary(settings: Any, now: datetime) -> datetime | None:
-    """Daily reset boundary, or None when LIVE_RESET_TIME is empty."""
+    """Reset boundary for LIVE_RESET_PERIOD, or None when disabled (period off or no time)."""
     at = parse_hhmm(getattr(settings, "live_reset_time", None))
-    return None if at is None else reset_boundary(now, settings.tz, at)
+    period = getattr(settings, "live_reset_period", "daily")
+    if at is None or period == "off":
+        return None
+    if period == "monthly":
+        return monthly_boundary(now, settings.tz, at)
+    return reset_boundary(now, settings.tz, at)
 
 
 async def _pin(bot: Any, chat_id: int, message_id: int) -> bool:
@@ -1552,7 +1567,8 @@ async def _startup_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def live_reset_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Daily at LIVE_RESET_TIME: refresh_live replaces live messages older than the boundary."""
+    """Daily at LIVE_RESET_TIME: refresh_live replaces live messages older than the boundary
+    (for LIVE_RESET_PERIOD=monthly that only happens on the 1st)."""
     bd = context.application.bot_data
     await refresh_live(context.bot, bd, latest_snapshot(bd))
 

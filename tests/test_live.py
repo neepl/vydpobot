@@ -676,6 +676,7 @@ def test_settings_reset_time_validation():
             "solarman_app_id": "a", "solarman_app_secret": "b", "solarman_email": "c",
             "solarman_password": "d", "_env_file": None}  # fmt: skip
     assert Settings(**base).live_reset_time == "09:00"
+    assert Settings(**base).live_reset_period == "monthly"
     assert Settings(**base, live_reset_time="6:05").live_reset_time == "06:05"
     assert Settings(**base, live_reset_time="").live_reset_time is None
     assert Settings(**base, monthly_report_time=" ").monthly_report_time is None
@@ -690,3 +691,40 @@ async def test_live_message_and_pin_are_silent(env):
     await run_cmd(env, [])
     assert env.bot.photo_silent == [True]
     assert all(p[2] is True for p in env.bot.pins)
+
+
+# ------------------------------------------------------------------ monthly reset period
+
+
+def test_monthly_boundary():
+    from datetime import time
+
+    at = time(9, 0)
+    mid = datetime(2026, 10, 15, 12, 0, tzinfo=TZ)
+    assert bot_mod.monthly_boundary(mid, TZ, at) == datetime(2026, 10, 1, 9, 0, tzinfo=TZ)
+    early = datetime(2026, 10, 1, 8, 59, tzinfo=TZ)  # before 09:00 on the 1st
+    assert bot_mod.monthly_boundary(early, TZ, at) == datetime(2026, 9, 1, 9, 0, tzinfo=TZ)
+    jan = datetime(2027, 1, 1, 7, 0, tzinfo=TZ)  # year rollover
+    assert bot_mod.monthly_boundary(jan, TZ, at) == datetime(2026, 12, 1, 9, 0, tzinfo=TZ)
+
+
+async def test_monthly_period_keeps_a_days_old_message(env):
+    env.bd["settings"].live_reset_period = "monthly"
+    env.bd["settings"].live_reset_time = "09:00"
+    now = datetime.now(UTC)
+    boundary = bot_mod.monthly_boundary(now, TZ, bot_mod.parse_hhmm("09:00"))
+    # created after this month's boundary (possibly days ago): edited, never re-created
+    seed_at(env, boundary + timedelta(minutes=1), CHAT)
+    await bot_mod.refresh_live(env.bot, env.bd, snap())
+    assert not env.bot.photos and len(env.bot.edits) == 1
+    # created before the boundary: replaced once
+    seed_at(env, boundary - timedelta(minutes=1), CHAT)
+    await bot_mod.refresh_live(env.bot, env.bd, snap())
+    assert len(env.bot.photos) == 1
+
+
+async def test_period_off_never_resets(env):
+    env.bd["settings"].live_reset_period = "off"
+    seed_at(env, datetime.now(UTC) - timedelta(days=400), CHAT)
+    await bot_mod.refresh_live(env.bot, env.bd, snap())
+    assert not env.bot.photos and len(env.bot.edits) == 1
