@@ -149,8 +149,8 @@ coordinate by keeping keys namespaced):
 
 - status: `status.title`, `status.updated` ({time}, {ago}), `status.pv`, `status.load`,
   `status.grid_import`, `status.grid_export`, `status.grid_idle`, `status.battery`
-  ({soc}), `status.state.charging` ({power}), `status.state.discharging` ({power}),
-  `status.state.idle`, `status.state.unknown`, `status.na`, `status.stale_warning` ({ago})
+  ({soc}), `status.bat_charging` ({power}), `status.bat_discharging` ({power}),
+  `status.bat_unknown`, `status.na`, `status.stale_warning` ({ago})
 - alerts: `alert.drop` ({soc}, {level}, {power}), `alert.recovered` ({soc}),
   `alert.stale` ({ago}), `alert.back_online`
 - chart: `chart.title` ({hours}), `chart.power_axis` (kW), `chart.soc_axis`, `chart.pv`,
@@ -269,8 +269,10 @@ Commands (register with `set_my_commands` for both en and uk via `language_code`
 - `/start`, `/help` -> `bot.help`
 - `/status` -> NO API call: the snapshot of the latest successful poll (cached in `bot_data` by
   `poll_once`), else `storage.latest_sample()` (e.g. after a restart); HTML message:
-  state line with emoji (⚡ charging / 🔋 discharging / ⏸ idle), ☀️ PV, 🏠 load, 🔌 grid
-  (import/export), 🔋 SOC with a 10-cell bar, updated time + "ago"; stale warning if old.
+  ☀️ PV, 🏠 load, 🔌 grid (import/export/outage), then ONE battery line: level plus what the
+  battery does ("⚡ Батарея 75% · заряджається 16,20 кВт"; idle shows only the level; ⚡ while
+  charging, 🪫 at or below the alert threshold, else 🔋), a 10-cell bar, updated time + "ago";
+  stale warning if old.
 - `/graph [hours]` (default 24, 1..48) -> `upload_photo` chat action; local `samples_between` first
   when they cover the window (oldest sample within 15 min of the start, no gap > 30 min); else
   cloud `get_history` (5-min frames; skipped at 100% of the API budget), and the fetched points
