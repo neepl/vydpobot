@@ -66,8 +66,8 @@ def test_marker_en_uk() -> None:
     s = real()
     en = format_status(s, "en", TZ, NOW, None)
     uk = format_status(s, "uk", TZ, NOW, None)
-    assert "Charging at ≈21.91 kW" in en
-    assert "Заряджається, ≈21,91 кВт" in uk
+    assert "⚡ Battery 70% · charging ≈21.91 kW" in en
+    assert "⚡ Батарея 70% · заряджається ≈21,91 кВт" in uk
     assert "≈+21.9" in format_live_summary(s, "en", TZ, NOW)
     assert "≈+21,9" in format_live_summary(s, "uk", TZ, NOW)
     assert _node_texts("battery", s, "en", s.battery_w, "from_hub")[1] == "≈21.91 kW"

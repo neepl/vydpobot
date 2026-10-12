@@ -7,8 +7,8 @@ from vydpobot.i18n import MESSAGES, SUPPORTED, fmt_ago, fmt_num, fmt_power, t
 
 REQUIRED = [
     "status.title", "status.updated", "status.pv", "status.load", "status.grid_import",
-    "status.grid_export", "status.grid_idle", "status.battery", "status.state.charging",
-    "status.state.discharging", "status.state.idle", "status.state.unknown", "status.na",
+    "status.grid_export", "status.grid_idle", "status.battery", "status.bat_charging",
+    "status.bat_discharging", "status.bat_unknown", "status.na",
     "status.stale_warning", "alert.drop", "alert.recovered", "alert.stale", "alert.back_online",
     "chart.title", "chart.power_axis", "chart.soc_axis", "chart.pv", "chart.load",
     "chart.battery", "chart.grid", "chart.threshold", "chart.no_data", "chart.summary",

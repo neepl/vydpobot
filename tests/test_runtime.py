@@ -323,7 +323,7 @@ def test_status_texts():
     assert "🔌 Мережа: немає (працюємо від батареї)" in uk
     lines = en.splitlines()
     bar = next(i for i, ln in enumerate(lines) if ln.startswith("<code>"))
-    assert lines[bar - 1] == "🔋 Battery 60%"
+    assert lines[bar - 1] == "🔋 Battery 60% · discharging 4.50 kW"
     assert lines[bar + 1].startswith("⏳")
 
 

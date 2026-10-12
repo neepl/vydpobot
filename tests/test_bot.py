@@ -54,7 +54,7 @@ def test_status_charging_en() -> None:
     s = snap(battery_w=1200, state=BatteryState.CHARGING, grid_w=-300, soc=47)
     out = format_status(s, "en", TZ, NOW + timedelta(minutes=3), 50)
     assert "⚡" in out
-    assert "Charging at 1.20 kW" in out
+    assert "⚡ Battery 47% · charging 1.20 kW" in out
     assert "☀️" in out and "1.50 kW" in out
     assert "Grid: exporting 300 W" in out
     assert "Battery 47%" in out
@@ -67,7 +67,7 @@ def test_status_charging_en() -> None:
 def test_status_discharging_uk() -> None:
     s = snap(battery_w=-2500, state=BatteryState.DISCHARGING, grid_w=0, soc=30)
     out = format_status(s, "uk", TZ, NOW, 50)
-    assert "Розряджається, 2,50 кВт" in out
+    assert "🪫 Батарея 30% · розряджається 2,50 кВт" in out
     assert "Батарея 30%" in out
     assert "Мережа: без обміну" in out
     assert "🪫" in out  # at/below threshold
@@ -75,7 +75,7 @@ def test_status_discharging_uk() -> None:
 
 def test_status_idle_import() -> None:
     out = format_status(snap(grid_w=700), "en", TZ, NOW, 50)
-    assert "⏸" in out and "Idle" in out
+    assert "🔋 Battery 80%\n" in out and "Idle" not in out  # idle: level only
     assert "Grid: importing 700 W" in out
 
 
@@ -83,7 +83,7 @@ def test_status_none_fields() -> None:
     s = snap(soc=None, pv_w=None, load_w=None, grid_w=None, battery_w=None)
     s = replace(s, battery_state=BatteryState.UNKNOWN)
     out = format_status(s, "en", TZ, NOW, 50)
-    assert "State unknown" in out
+    assert "🔋 Battery: n/a · state unknown" in out
     assert out.count("n/a") >= 4
     assert "░░░░░░░░░░" in out
 
@@ -507,3 +507,16 @@ async def test_balance_api_locked_skips_checks_for_a_week(bal, caplog) -> None:
     assert bal["source"].calls == 1
     await bot_mod.balance_once(bal, NOW + timedelta(days=7))
     assert bal["source"].calls == 2  # retried after a week
+
+
+def test_sunny_outage_summary_shows_grid_off():
+    from dataclasses import replace
+
+    from vydpobot.bot import format_live_summary
+
+    s = replace(
+        Snapshot(NOW - timedelta(minutes=2), 70.0, 6000, 2000, 0.0, 3800, BatteryState.CHARGING),
+        grid_online=False,
+    )
+    summary = format_live_summary(s, "uk", TZ, NOW, False)
+    assert "🔌 немає" in summary and "0,0 кВт · 🔌" not in summary

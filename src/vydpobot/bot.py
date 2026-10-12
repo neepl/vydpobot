@@ -4,6 +4,7 @@ import asyncio
 import html
 import logging
 import math
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
@@ -111,13 +112,6 @@ EQUIP_EMOJI = {
 }
 NOT_FOUND_EMOJI = "❓"
 
-STATE_EMOJI = {
-    BatteryState.CHARGING: "⚡",
-    BatteryState.DISCHARGING: "🔋",
-    BatteryState.IDLE: "⏸",
-    BatteryState.UNKNOWN: "❔",
-}
-
 COMMANDS = ("start", "help", "status", "graph", "month", "threshold", "lang", "live", "health")
 
 
@@ -177,15 +171,6 @@ def _status_lines(
         return na if w is None else fmt_power(lang, w)
 
     s = snapshot
-    approx = "≈" if s.battery_estimated else ""
-    if s.battery_state == BatteryState.CHARGING:
-        state = t(lang, "status.state.charging", power=approx + power(abs(s.battery_w or 0)))
-    elif s.battery_state == BatteryState.DISCHARGING:
-        state = t(lang, "status.state.discharging", power=approx + power(abs(s.battery_w or 0)))
-    elif s.battery_state == BatteryState.IDLE:
-        state = t(lang, "status.state.idle")
-    else:
-        state = t(lang, "status.state.unknown")
 
     off = grid_off or runtime is not None or s.grid_online is False
     if off and outage_since is not None and tz is not None and now is not None:
@@ -205,22 +190,46 @@ def _status_lines(
     else:
         grid = t(lang, "status.grid_idle")
 
-    low = threshold is not None and s.soc is not None and s.soc <= threshold
-    bat_txt = na if s.soc is None else t(lang, "status.battery", soc=_num(s.soc))
-    bat = f"{'🪫' if low else '🔋'} {bat_txt}"
     lines = [
         f"<b>{html.escape(t(lang, 'status.title'))}</b>",
         "",
-        f"{STATE_EMOJI[s.battery_state]} {html.escape(state)}",
         f"☀️ {html.escape(t(lang, 'status.pv'))}: {html.escape(power(s.pv_w))}",
         f"🏠 {html.escape(t(lang, 'status.load'))}: {html.escape(power(s.load_w))}",
         f"🔌 {html.escape(grid)}",
-        html.escape(bat),
+        html.escape(_battery_line(s, lang, threshold, power)),
     ]
     lines.append(f"<code>{soc_bar(s.soc)}</code>")
     if runtime is not None and tz is not None and now is not None:
         lines.append(html.escape(_runtime_line(runtime, lang, tz, now)))
     return lines
+
+
+def _battery_line(
+    s: Snapshot, lang: Lang, threshold: float | None, power: Callable[[float | None], str]
+) -> str:
+    """One battery line: level plus what it does, e.g. '⚡ Батарея 75% · заряджається 16,20 кВт'.
+
+    Idle shows only the level (no vague state word); ⚡ while charging, 🪫 when at or below the
+    alert threshold, else 🔋.
+    """
+    soc = (
+        f"{t(lang, 'flow.battery')}: {t(lang, 'status.na')}"
+        if s.soc is None
+        else t(lang, "status.battery", soc=_num(s.soc))
+    )
+    approx = "≈" if s.battery_estimated else ""
+    watts = approx + power(abs(s.battery_w or 0))
+    if s.battery_state == BatteryState.CHARGING:
+        detail: str | None = t(lang, "status.bat_charging", power=watts)
+    elif s.battery_state == BatteryState.DISCHARGING:
+        detail = t(lang, "status.bat_discharging", power=watts)
+    elif s.battery_state == BatteryState.UNKNOWN:
+        detail = t(lang, "status.bat_unknown")
+    else:
+        detail = None
+    low = threshold is not None and s.soc is not None and s.soc <= threshold
+    emoji = "⚡" if s.battery_state == BatteryState.CHARGING else "🪫" if low else "🔋"
+    return f"{emoji} {soc}" + (f" · {detail}" if detail else "")
 
 
 def _is_stale(age: float, stale_after_min: int) -> bool:
@@ -284,7 +293,7 @@ def format_live_summary(
     s = snapshot
     soc = DASH if s.soc is None else f"{s.soc:.0f}%"
     approx = "≈" if s.battery_estimated and s.battery_w is not None else ""
-    outage = grid_off or runtime is not None
+    outage = grid_off or runtime is not None or s.grid_online is False
     home = f"🏠 {_kw(lang, s.load_w)}"
     if outage:
         parts = [
