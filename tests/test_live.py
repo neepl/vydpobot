@@ -1,7 +1,7 @@
 """Pinned live-status message: caption, /live command and per-poll refresh."""
 
 import html
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -209,7 +209,7 @@ def env(tmp_path):
         solarman_device_sn=None,
         solarman_station_id=None,
         poll_interval_s=300,
-        live_reset_time="00:00",
+        monthly_report_time="09:00",
     )
     source = FakeSource()
     bot = FakeBot()
@@ -473,7 +473,7 @@ async def test_post_init_schedules_startup_refresh(env, monkeypatch, tmp_path):
 
     app = SimpleNamespace(bot_data={"settings": env.bd["settings"]}, bot=B(), job_queue=JQ())
     await bot_mod._post_init(app)
-    once = [o for o in once if o[0] is not bot_mod.balance_job]
+    once = [o for o in once if o[0] not in (bot_mod.balance_job, bot_mod.monthly_startup_job)]
     assert len(once) == 1 and once[0][1] <= 5
     app.bot_data["storage"].close()
     # the scheduled job refreshes from the latest stored sample
@@ -485,49 +485,9 @@ async def test_post_init_schedules_startup_refresh(env, monkeypatch, tmp_path):
 
 # ------------------------------------------------------------------ daily reset
 
-KYIV_MIDNIGHT = time(0, 0)
-
 
 def utc(*a):
     return datetime(*a, tzinfo=UTC)
-
-
-def test_reset_boundary_just_after_and_before_midnight():
-    # 00:00:01 local (21:00:01 UTC, summer EEST +3) -> today's midnight
-    after = bot_mod.reset_boundary(utc(2026, 10, 9, 21, 0, 1), TZ, KYIV_MIDNIGHT)
-    assert after == datetime(2026, 10, 10, 0, 0, tzinfo=TZ)
-    # 23:59:59 local the evening before -> the previous midnight
-    before = bot_mod.reset_boundary(utc(2026, 10, 9, 20, 59, 59), TZ, KYIV_MIDNIGHT)
-    assert before == datetime(2026, 10, 9, 0, 0, tzinfo=TZ)
-    exact = bot_mod.reset_boundary(utc(2026, 10, 9, 21, 0, 0), TZ, KYIV_MIDNIGHT)
-    assert exact == datetime(2026, 10, 10, 0, 0, tzinfo=TZ)  # <= now
-
-
-def test_reset_boundary_custom_time():
-    at = time(6, 30)
-    assert bot_mod.reset_boundary(utc(2026, 10, 10, 3, 29), TZ, at) == datetime(
-        2026, 10, 9, 6, 30, tzinfo=TZ
-    )  # 06:29 local: still yesterday's boundary
-    assert bot_mod.reset_boundary(utc(2026, 10, 10, 3, 30), TZ, at) == datetime(
-        2026, 10, 10, 6, 30, tzinfo=TZ
-    )
-
-
-def test_reset_boundary_dst_change_days():
-    # Spring forward 2026-03-29 (03:00 -> 04:00): local midnight is still EET (+2)
-    b = bot_mod.reset_boundary(utc(2026, 3, 29, 10, 0), TZ, KYIV_MIDNIGHT)
-    assert b.astimezone(UTC) == utc(2026, 3, 28, 22, 0)
-    # the day after: the boundary is EEST (+3), 21:00 UTC the evening before
-    b = bot_mod.reset_boundary(utc(2026, 3, 30, 10, 0), TZ, KYIV_MIDNIGHT)
-    assert b.astimezone(UTC) == utc(2026, 3, 29, 21, 0)
-    # 03:30 does not exist on 2026-03-29: no boundary yet at 04:10 local (01:10 UTC)
-    b = bot_mod.reset_boundary(utc(2026, 3, 29, 1, 10), TZ, time(3, 30))
-    assert b.astimezone(UTC) == utc(2026, 3, 28, 1, 30)
-    # Fall back 2026-10-25 (04:00 -> 03:00): 03:30 happens twice, the first one counts
-    b = bot_mod.reset_boundary(utc(2026, 10, 25, 12, 0), TZ, time(3, 30))
-    assert b.astimezone(UTC) == utc(2026, 10, 25, 0, 30)
-    b = bot_mod.reset_boundary(utc(2026, 10, 25, 12, 0), TZ, KYIV_MIDNIGHT)
-    assert b.astimezone(UTC) == utc(2026, 10, 24, 21, 0)
 
 
 def seed_at(env, created_at, *chats):
@@ -563,9 +523,9 @@ async def test_legacy_int_does_not_trigger_reset(env):
     assert [e[:2] for e in env.bot.edits] == [(CHAT, 900)]
 
 
-async def test_refresh_after_boundary_resets(env):
+async def test_renew_replaces_live_message(env):
     seed_at(env, yesterday(), CHAT)
-    await bot_mod.refresh_live(env.bot, env.bd, snap())
+    await bot_mod.refresh_live(env.bot, env.bd, snap(), renew=True)
     assert env.bot.deleted == [(CHAT, 900)]
     assert len(env.bot.photos) == 1 and not env.bot.edits
     assert env.bot.pins == [(CHAT, 501, True)]
@@ -573,13 +533,13 @@ async def test_refresh_after_boundary_resets(env):
     raw = live_raw(env)[str(CHAT)]
     assert raw["message_id"] == 501
     assert datetime.now(UTC) - datetime.fromisoformat(raw["created_at"]) < timedelta(minutes=1)
-    # a second refresh edits the new message, no second reset
+    # a normal refresh edits the new message
     await bot_mod.refresh_live(env.bot, env.bd, snap())
     assert len(env.bot.photos) == 1 and env.bot.edits[0][:2] == (CHAT, 501)
 
 
-async def test_refresh_before_boundary_edits(env):
-    seed_at(env, datetime.now(UTC) - timedelta(seconds=30), CHAT)
+async def test_refresh_never_replaces_an_old_message_by_itself(env):
+    seed_at(env, datetime.now(UTC) - timedelta(days=40), CHAT)
     await bot_mod.refresh_live(env.bot, env.bd, snap())
     assert not env.bot.photos and len(env.bot.edits) == 1
 
@@ -588,7 +548,7 @@ async def test_refresh_before_boundary_edits(env):
 async def test_delete_failure_falls_back_to_unpin(env, err):
     seed_at(env, yesterday(), CHAT)
     env.bot.delete_error = err
-    await bot_mod.refresh_live(env.bot, env.bd, snap())
+    await bot_mod.refresh_live(env.bot, env.bd, snap(), renew=True)
     assert env.bot.unpins == [(CHAT, 900)]
     assert env.bot.calls == ["delete", "unpin", "send_photo", "pin"]
     assert live(env) == {str(CHAT): 501}
@@ -597,26 +557,74 @@ async def test_delete_failure_falls_back_to_unpin(env, err):
 async def test_reset_pin_failure_is_not_fatal(env):
     seed_at(env, yesterday(), CHAT)
     env.bot.pin_error = Forbidden("not enough rights")
-    await bot_mod.refresh_live(env.bot, env.bd, snap())
+    await bot_mod.refresh_live(env.bot, env.bd, snap(), renew=True)
     assert live(env) == {str(CHAT): 501}
 
 
-async def test_daily_job_resets_all_chats(env):
+def first_of_month(hour=9, minute=5):
+    return datetime(2026, 11, 1, hour, minute, tzinfo=TZ).astimezone(UTC)
+
+
+async def test_monthly_renewal_on_the_first_once(env):
+    env.bd["settings"].monthly_report_time = "09:00"
     seed_at(env, yesterday(), CHAT, -200)
     env.storage.add_sample(snap())
-    await bot_mod.live_reset_job(ctx(env))
+    assert await bot_mod.renew_live_monthly(env.bot, env.bd, first_of_month())
     assert env.bot.deleted == [(CHAT, 900), (-200, 901)]
     assert [p[0] for p in env.bot.photos] == [CHAT, -200]
     assert live(env) == {str(CHAT): 501, "-200": 502}
     assert env.source.calls == 0
+    # once per month, also after a restart (persisted)
+    assert not await bot_mod.renew_live_monthly(env.bot, env.bd, first_of_month(15))
+    assert len(env.bot.photos) == 2
 
 
-async def test_reset_disabled_never_resets(env):
-    env.bd["settings"].live_reset_time = None
+async def test_monthly_renewal_only_on_the_first_and_after_the_time(env):
+    env.bd["settings"].monthly_report_time = "09:00"
+    seed_at(env, yesterday(), CHAT)
+    second = datetime(2026, 11, 2, 9, 5, tzinfo=TZ).astimezone(UTC)
+    assert not await bot_mod.renew_live_monthly(env.bot, env.bd, second)
+    early = first_of_month(8, 30)
+    assert not await bot_mod.renew_live_monthly(env.bot, env.bd, early, respect_time=True)
+    assert not env.bot.photos
+
+
+async def test_monthly_renewal_disabled_without_report_time(env):
+    env.bd["settings"].monthly_report_time = None
     seed_at(env, datetime.now(UTC) - timedelta(days=30), CHAT)
-    await bot_mod.refresh_live(env.bot, env.bd, snap())
+    assert not await bot_mod.renew_live_monthly(env.bot, env.bd, first_of_month())
     assert not env.bot.photos and not env.bot.deleted
-    assert len(env.bot.edits) == 1
+
+
+@pytest.mark.parametrize("outcome", ["posted", "unsupported", "failed"])
+async def test_monthly_job_renews_live_only_after_the_report(env, monkeypatch, outcome):
+    from vydpobot.solarman.client import SolarmanError
+
+    order, queued = [], []
+
+    async def report(bot, bd, now, *, respect_time=False):
+        order.append("report")
+        if outcome == "unsupported":
+            raise SolarmanError("no monthly data", "unsupported")
+        if outcome == "failed":
+            raise SolarmanError("timeout", "500")
+        return True
+
+    async def renew(bot, bd, now, *, respect_time=False):
+        order.append("renew")
+        return True
+
+    monkeypatch.setattr(bot_mod, "monthly_report_once", report)
+    monkeypatch.setattr(bot_mod, "renew_live_monthly", renew)
+    jq = SimpleNamespace(run_once=lambda cb, when, **kw: queued.append(cb))
+    context = SimpleNamespace(
+        application=SimpleNamespace(bot_data=env.bd), bot=env.bot, job_queue=jq
+    )
+    await bot_mod._monthly(context, respect_time=False)
+    if outcome == "failed":
+        assert order == ["report"] and queued == [bot_mod.monthly_startup_job]
+    else:
+        assert order == ["report", "renew"] and not queued  # live message is the last one
 
 
 async def test_live_command_stores_created_at(env):
@@ -675,13 +683,11 @@ def test_settings_reset_time_validation():
     base = {"telegram_token": "x", "alert_chat_id": 1, "solarman_backend": "openapi",
             "solarman_app_id": "a", "solarman_app_secret": "b", "solarman_email": "c",
             "solarman_password": "d", "_env_file": None}  # fmt: skip
-    assert Settings(**base).live_reset_time == "09:00"
-    assert Settings(**base).live_reset_period == "monthly"
-    assert Settings(**base, live_reset_time="6:05").live_reset_time == "06:05"
-    assert Settings(**base, live_reset_time="").live_reset_time is None
+    assert Settings(**base).monthly_report_time == "09:00"
+    assert Settings(**base, monthly_report_time="6:05").monthly_report_time == "06:05"
     assert Settings(**base, monthly_report_time=" ").monthly_report_time is None
     with pytest.raises(ValueError):
-        Settings(**base, live_reset_time="25:00")
+        Settings(**base, monthly_report_time="25:00")
     with pytest.raises(ValueError):
         Settings(**base, monthly_report_time="9am")
 
@@ -691,40 +697,3 @@ async def test_live_message_and_pin_are_silent(env):
     await run_cmd(env, [])
     assert env.bot.photo_silent == [True]
     assert all(p[2] is True for p in env.bot.pins)
-
-
-# ------------------------------------------------------------------ monthly reset period
-
-
-def test_monthly_boundary():
-    from datetime import time
-
-    at = time(9, 0)
-    mid = datetime(2026, 10, 15, 12, 0, tzinfo=TZ)
-    assert bot_mod.monthly_boundary(mid, TZ, at) == datetime(2026, 10, 1, 9, 0, tzinfo=TZ)
-    early = datetime(2026, 10, 1, 8, 59, tzinfo=TZ)  # before 09:00 on the 1st
-    assert bot_mod.monthly_boundary(early, TZ, at) == datetime(2026, 9, 1, 9, 0, tzinfo=TZ)
-    jan = datetime(2027, 1, 1, 7, 0, tzinfo=TZ)  # year rollover
-    assert bot_mod.monthly_boundary(jan, TZ, at) == datetime(2026, 12, 1, 9, 0, tzinfo=TZ)
-
-
-async def test_monthly_period_keeps_a_days_old_message(env):
-    env.bd["settings"].live_reset_period = "monthly"
-    env.bd["settings"].live_reset_time = "09:00"
-    now = datetime.now(UTC)
-    boundary = bot_mod.monthly_boundary(now, TZ, bot_mod.parse_hhmm("09:00"))
-    # created after this month's boundary (possibly days ago): edited, never re-created
-    seed_at(env, boundary + timedelta(minutes=1), CHAT)
-    await bot_mod.refresh_live(env.bot, env.bd, snap())
-    assert not env.bot.photos and len(env.bot.edits) == 1
-    # created before the boundary: replaced once
-    seed_at(env, boundary - timedelta(minutes=1), CHAT)
-    await bot_mod.refresh_live(env.bot, env.bd, snap())
-    assert len(env.bot.photos) == 1
-
-
-async def test_period_off_never_resets(env):
-    env.bd["settings"].live_reset_period = "off"
-    seed_at(env, datetime.now(UTC) - timedelta(days=400), CHAT)
-    await bot_mod.refresh_live(env.bot, env.bd, snap())
-    assert not env.bot.photos and len(env.bot.edits) == 1

@@ -67,7 +67,7 @@ from vydpobot.runtime import (
     on_battery,
     outage_active,
 )
-from vydpobot.solarman.client import BalanceUnavailable
+from vydpobot.solarman.client import BalanceUnavailable, SolarmanError
 from vydpobot.solarman.portal import PortalAuthError
 from vydpobot.source import DataSource, make_source
 from vydpobot.storage import (
@@ -76,6 +76,7 @@ from vydpobot.storage import (
     KEY_EQUIPMENT_STATE,
     KEY_LANGUAGE,
     KEY_LIVE_MESSAGES,
+    KEY_LIVE_RENEWED,
     KEY_MONTH_REPORTED,
     KEY_OUTAGE_SINCE,
     KEY_PORTAL_AUTH_NOTIFIED,
@@ -885,8 +886,28 @@ def _live_entry(message_id: int, created_at: datetime) -> dict[str, Any]:
     return {"message_id": message_id, "created_at": created_at.isoformat()}
 
 
-def _created_at(entry: dict[str, Any]) -> datetime:
-    return datetime.fromisoformat(entry["created_at"])
+async def _pin(bot: Any, chat_id: int, message_id: int) -> bool:
+    """Pin silently; False if the bot lacks the right."""
+    try:
+        await bot.pin_chat_message(
+            chat_id=chat_id, message_id=message_id, disable_notification=True
+        )
+    except (BadRequest, Forbidden) as e:
+        log.info("Cannot pin live message in chat %s: %s", chat_id, e)
+        return False
+    return True
+
+
+async def _send_live(bot: Any, chat_id: int, png: bytes, caption: str) -> tuple[int, bool]:
+    """Send the live photo and pin it. Returns (message_id, pinned)."""
+    msg = await bot.send_photo(  # silent: the live message is ambient, not news
+        chat_id=chat_id,
+        photo=png,
+        caption=caption,
+        parse_mode=ParseMode.HTML,
+        disable_notification=True,
+    )
+    return msg.message_id, await _pin(bot, chat_id, msg.message_id)
 
 
 def _live_map(storage: Storage) -> dict[str, dict[str, Any]]:
@@ -913,63 +934,6 @@ def _live_map(storage: Storage) -> dict[str, dict[str, Any]]:
     if migrated or len(out) != len(raw):
         storage.set_json(KEY_LIVE_MESSAGES, out)
     return out
-
-
-def reset_boundary(now: datetime, tz: ZoneInfo, reset_time: time) -> datetime:
-    """The most recent local occurrence of `reset_time` that is <= now (aware, in `tz`)."""
-    local = now.astimezone(tz)
-    day = local.date()
-    for _ in range(3):  # one step back is enough; the loop guards odd DST gaps
-        boundary = datetime.combine(day, reset_time, tzinfo=tz).astimezone(UTC)
-        if boundary <= now:
-            return boundary.astimezone(tz)
-        day -= timedelta(days=1)
-    raise AssertionError("unreachable")
-
-
-def monthly_boundary(now: datetime, tz: ZoneInfo, reset_time: time) -> datetime:
-    """The most recent 1st-of-month at `reset_time` (local) that is <= now (aware, in `tz`)."""
-    first = now.astimezone(tz).date().replace(day=1)
-    boundary = datetime.combine(first, reset_time, tzinfo=tz)
-    if boundary.astimezone(UTC) <= now:
-        return boundary
-    prev = (first - timedelta(days=1)).replace(day=1)
-    return datetime.combine(prev, reset_time, tzinfo=tz)
-
-
-def _live_boundary(settings: Any, now: datetime) -> datetime | None:
-    """Reset boundary for LIVE_RESET_PERIOD, or None when disabled (period off or no time)."""
-    at = parse_hhmm(getattr(settings, "live_reset_time", None))
-    period = getattr(settings, "live_reset_period", "daily")
-    if at is None or period == "off":
-        return None
-    if period == "monthly":
-        return monthly_boundary(now, settings.tz, at)
-    return reset_boundary(now, settings.tz, at)
-
-
-async def _pin(bot: Any, chat_id: int, message_id: int) -> bool:
-    """Pin silently; False if the bot lacks the right."""
-    try:
-        await bot.pin_chat_message(
-            chat_id=chat_id, message_id=message_id, disable_notification=True
-        )
-    except (BadRequest, Forbidden) as e:
-        log.info("Cannot pin live message in chat %s: %s", chat_id, e)
-        return False
-    return True
-
-
-async def _send_live(bot: Any, chat_id: int, png: bytes, caption: str) -> tuple[int, bool]:
-    """Send the live photo and pin it. Returns (message_id, pinned)."""
-    msg = await bot.send_photo(  # silent: the live message is ambient, not news
-        chat_id=chat_id,
-        photo=png,
-        caption=caption,
-        parse_mode=ParseMode.HTML,
-        disable_notification=True,
-    )
-    return msg.message_id, await _pin(bot, chat_id, msg.message_id)
 
 
 def _gone(e: BadRequest) -> bool:
@@ -1020,16 +984,21 @@ async def _reset_live(bot: Any, chat_id: int, old_id: int, png: bytes, caption: 
 
 
 async def refresh_live(
-    bot: Any, bd: dict[str, Any], snap: Snapshot | None, only_chat: int | None = None
+    bot: Any,
+    bd: dict[str, Any],
+    snap: Snapshot | None,
+    only_chat: int | None = None,
+    *,
+    renew: bool = False,
 ) -> None:
-    """Edit the live message(s) with `snap`, first replacing those older than the daily reset
-    boundary. Never raises; never calls the data source."""
+    """Edit the live message(s) with `snap`; with renew=True replace them by new pinned
+    messages instead (monthly, after the report). Never raises; never calls the data source."""
     async with bd.setdefault("live_lock", asyncio.Lock()):
-        await _refresh_live(bot, bd, snap, only_chat)
+        await _refresh_live(bot, bd, snap, only_chat, renew)
 
 
 async def _refresh_live(
-    bot: Any, bd: dict[str, Any], snap: Snapshot | None, only_chat: int | None
+    bot: Any, bd: dict[str, Any], snap: Snapshot | None, only_chat: int | None, renew: bool
 ) -> None:
     try:
         storage: Storage = bd["storage"]
@@ -1043,7 +1012,6 @@ async def _refresh_live(
             return
         settings: Settings = bd["settings"]
         lang, now = get_lang(bd), datetime.now(UTC)
-        boundary = _live_boundary(settings, now)
         grid_off, runtime = runtime_context(bd, snap, now)
         caption = _live_caption(bd, snap, lang, now, runtime, grid_off)
         png = await asyncio.to_thread(
@@ -1065,7 +1033,7 @@ async def _refresh_live(
     for key, entry in live.items():
         chat_id, message_id = int(key), entry["message_id"]
         try:
-            if boundary is not None and _created_at(entry) < boundary:
+            if renew:
                 new_id = await _reset_live(bot, chat_id, message_id, png, caption)
                 updates[key] = _live_entry(new_id, now)
                 continue
@@ -1566,13 +1534,6 @@ async def _startup_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
     await refresh_live(context.bot, bd, latest_snapshot(bd))
 
 
-async def live_reset_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Daily at LIVE_RESET_TIME: refresh_live replaces live messages older than the boundary
-    (for LIVE_RESET_PERIOD=monthly that only happens on the 1st)."""
-    bd = context.application.bot_data
-    await refresh_live(context.bot, bd, latest_snapshot(bd))
-
-
 async def monthly_report_once(
     bot: Any, bd: dict[str, Any], now: datetime, *, respect_time: bool = False
 ) -> bool:
@@ -1605,13 +1566,47 @@ MONTHLY_RETRY_S = 1800
 
 async def _monthly(context: ContextTypes.DEFAULT_TYPE, *, respect_time: bool) -> None:
     bd = context.application.bot_data
+    now = datetime.now(UTC)
     try:
-        await monthly_report_once(context.bot, bd, datetime.now(UTC), respect_time=respect_time)
-    except Exception:
-        log.exception("Monthly report failed; retrying in %d s", MONTHLY_RETRY_S)
-        jq = getattr(context, "job_queue", None)
-        if jq is not None:
-            jq.run_once(monthly_startup_job, when=MONTHLY_RETRY_S, name="monthly_retry")
+        await monthly_report_once(context.bot, bd, now, respect_time=respect_time)
+    except SolarmanError as e:
+        if e.code != "unsupported":
+            _monthly_retry(context, e)
+            return  # renew only after the report, so the live message stays the last one
+        log.info("Monthly report not available for this backend")
+    except Exception as e:
+        _monthly_retry(context, e)
+        return
+    await renew_live_monthly(context.bot, bd, now, respect_time=respect_time)
+
+
+def _monthly_retry(context: ContextTypes.DEFAULT_TYPE, e: Exception) -> None:
+    log.error("Monthly report failed (%s); retrying in %d s", e, MONTHLY_RETRY_S)
+    jq = getattr(context, "job_queue", None)
+    if jq is not None:
+        jq.run_once(monthly_startup_job, when=MONTHLY_RETRY_S, name="monthly_retry")
+
+
+async def renew_live_monthly(
+    bot: Any, bd: dict[str, Any], now: datetime, *, respect_time: bool = False
+) -> bool:
+    """On the 1st, after the monthly report: replace the pinned live message(s) by new ones so
+    they are the last message in the chat. Once per month (persisted). Returns True if done."""
+    settings: Settings = bd["settings"]
+    at = parse_hhmm(getattr(settings, "monthly_report_time", None))
+    if at is None:
+        return False
+    local = now.astimezone(settings.tz)
+    if local.day != 1 or (respect_time and local.time() < at):
+        return False
+    storage: Storage = bd["storage"]
+    key = month_key(local.year, local.month)
+    if storage.get_json(KEY_LIVE_RENEWED) == key:
+        return False
+    await refresh_live(bot, bd, latest_snapshot(bd), renew=True)
+    storage.set_json(KEY_LIVE_RENEWED, key)
+    log.info("Live message renewed for %s", key)
+    return True
 
 
 async def monthly_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1702,10 +1697,6 @@ async def _post_init(app: Application) -> None:
         app.job_queue.run_daily(balance_job, time(0, 10, tzinfo=settings.tz), name="balance")
         app.job_queue.run_once(balance_job, when=60, name="balance_startup")
     app.job_queue.run_once(_startup_refresh, when=3, name="live_startup")
-    if (reset_at := parse_hhmm(getattr(settings, "live_reset_time", None))) is not None:
-        app.job_queue.run_daily(
-            live_reset_job, reset_at.replace(tzinfo=settings.tz), name="live_reset"
-        )
     if (report_at := parse_hhmm(getattr(settings, "monthly_report_time", None))) is not None:
         app.job_queue.run_daily(
             monthly_report_job, report_at.replace(tzinfo=settings.tz), name="monthly_report"

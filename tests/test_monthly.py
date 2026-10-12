@@ -384,7 +384,6 @@ def env(tmp_path):
         tz=TZ,
         solarman_station_id=1,
         monthly_report_time="09:00",
-        live_reset_time=None,
         poll_interval_s=300,
     )
     source = FakeSource()
@@ -551,7 +550,6 @@ async def test_report_failure_is_not_marked_and_retries(env):
 async def test_post_init_schedules_jobs(env, monkeypatch, tmp_path):
     env.settings.db_path = tmp_path / "p.db"
     env.settings.solarman_backend = "openapi"
-    env.settings.live_reset_time = "00:00"
     monkeypatch.setattr(bot_mod, "make_source", lambda *a, **k: object())
     monkeypatch.setattr(bot_mod, "_log_quota_plan", lambda s: None)
     daily, once = [], []
@@ -574,16 +572,13 @@ async def test_post_init_schedules_jobs(env, monkeypatch, tmp_path):
     await bot_mod._post_init(app)
     app.bot_data["storage"].close()
     by_cb = dict(daily)
-    assert by_cb[bot_mod.live_reset_job].hour == 0 and by_cb[bot_mod.live_reset_job].tzinfo == TZ
     assert by_cb[bot_mod.monthly_report_job].hour == 9
     assert bot_mod.monthly_startup_job in once
     # disabled
-    env.settings.live_reset_time = None
     env.settings.monthly_report_time = None
     daily.clear()
     once.clear()
     await bot_mod._post_init(app)
     app.bot_data["storage"].close()
-    assert bot_mod.live_reset_job not in dict(daily)
     assert bot_mod.monthly_report_job not in dict(daily)
     assert bot_mod.monthly_startup_job not in once

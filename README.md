@@ -27,7 +27,8 @@ SUN-xK-SG04LP3) through the Solarman Cloud OpenAPI. It runs in Docker on a small
 - `/month [YYYY-MM]`: grouped daily bars (solar, consumption, from grid) and monthly totals with
   the self-sufficiency percentage; a report of the previous month is posted automatically on the
   1st (OpenAPI backend). See "Monthly statistics".
-- A fresh pinned live message every day. See "Daily fresh live message".
+- A fresh pinned live message once a month, after the monthly report. See "Fresh live message
+  each month".
 - Runtime threshold and language (English / Ukrainian) changes, persisted in SQLite.
 - 14 days of local samples are kept so charts still work if the cloud history call fails.
 
@@ -507,26 +508,28 @@ The first caption line is what Telegram shows in the pinned bar:
 
 `—` stands for a missing value.
 
-## Daily fresh live message
+## Fresh live message each month
 
-By default (`LIVE_RESET_TIME=09:00`, local `TIMEZONE`) the bot replaces every live message with a
-new one once a day: it deletes the old message, sends a new photo with the current caption and
-image (from the latest stored data, no API call), pins it and remembers its creation time. Both
-the new message and the pin are sent **silently** (`disable_notification`), so nobody gets a
-notification sound; it just appears in the chat.
-This keeps the pinned message fresh and recent in the chat.
+The bot edits the pinned live message in place. An edit does not show as a new message in the
+chat. The bot replaces the live message by a new one only in these two cases:
 
-- The check runs in a daily job at that time and at the start of every live refresh, so a bot that
-  was down at the reset time resets on its first refresh after the start (3 s after startup).
-- Telegram only lets a bot delete messages younger than 48 hours. The daily reset stays well inside
-  that limit. If the delete still fails, the bot unpins the old message instead and the new one is
-  pinned anyway.
-- Upgrading: live messages created before this feature get "now" as their creation time on the
-  first start, so nothing is reset immediately.
-- Optional: every pin leaves a "bot pinned a photo" service notice in the group. If you also give
-  the bot the **Delete messages** admin right (besides "Pin Messages"), it removes its own notices
-  automatically. Without the right the notices stay; nothing else changes.
-- Set `LIVE_RESET_TIME=` (empty) to disable the daily reset. `/live` behaves as before.
+1. **Once a month, after the monthly report.** On the 1st at `MONTHLY_REPORT_TIME` (default
+   09:00), the bot first posts the monthly report. Then it replaces the live message. The live
+   message is then the last message in the chat. If the report fails, the bot tries again after
+   30 minutes and replaces the live message only after the report. If the backend has no monthly
+   data (portal backend), the bot replaces the live message at that time without a report.
+2. **When a user deletes the live message.** The next refresh cannot edit the message. The bot
+   then sends a new live message and pins it.
+
+The bot sends the new message and the pin silently (`disable_notification`).
+
+- Telegram lets a bot delete only messages younger than 48 hours. The old live message is about one
+  month old, so the delete usually fails. The bot then unpins the old message and pins the new one.
+  The old photo stays in the chat history. An admin can delete it manually.
+- If `MONTHLY_REPORT_TIME` is empty, there is no monthly report and no monthly replacement.
+- If the bot is down on the 1st at that time, it does both steps after the start on the same day.
+- Every pin adds a "bot pinned a photo" service notice to the group. Give the bot the **Delete
+  messages** admin right (together with "Pin Messages") to let it remove its own notices.
 
 ## Monthly statistics
 

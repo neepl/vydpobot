@@ -283,7 +283,7 @@ Commands (register with `set_my_commands` for both en and uk via `language_code`
   `month.invalid`) -> `upload_photo`, `build_month_report` (`monthly.load_month` + `render_month_chart`
   + `format_month_caption`), photo with HTML caption. Errors -> `month.error` (`month.unsupported`
   when the SolarmanError code is "unsupported", i.e. portal backend).
-Live message (see "Daily live reset"): `KEY_LIVE_MESSAGES` = `{str(chat_id): {"message_id", "created_at"}}`;
+Live message (see "Monthly live renewal"): `KEY_LIVE_MESSAGES` = `{str(chat_id): {"message_id", "created_at"}}`;
 a legacy int value is read as created "now" and rewritten (no immediate reset).
 Jobs:
 - `poll` every `poll_interval_s` (first after 10 s): get_snapshot -> add_sample ->
@@ -291,20 +291,31 @@ Jobs:
   persist state -> send events to alert_chat_id. Exceptions logged, never crash the job;
   after 3 consecutive poll failures send one `alert.stale`-like error note (reuse staleness flag).
 - `prune` daily: keep 14 days of samples.
-- `live_reset` (`run_daily` at `live_reset_time`, tz-aware; none when empty): `refresh_live`.
 - `monthly_report` (`run_daily` at `monthly_report_time`) + `monthly_startup` (once, 20 s after
-  start, respects the time of day) -> `monthly_report_once`; a failure schedules a retry in 30 min.
+  start, respects the time of day) -> `monthly_report_once`, then `renew_live_monthly`. A report
+  failure schedules a retry in 30 min and skips the renewal, so the live message comes after the
+  report. A `SolarmanError` with code `unsupported` (portal backend) does not block the renewal.
 
-### Daily live reset
-`reset_boundary(now, tz, reset_time)` = the most recent local occurrence of `reset_time` that is
-<= now (DST-safe: compared in UTC). `refresh_live` (under an asyncio lock in `bot_data`) first
-resets every entry with `created_at < boundary`: best-effort `delete_message` (on TelegramError
-best-effort `unpin_chat_message`), `send_photo` with the current caption/image (stored sample, no API
-call), `pin_chat_message(disable_notification=True)` (failure non-fatal), store
-`{message_id, created_at: now}`. Telegram deletes only messages < 48 h old; the daily cadence stays
-inside that. `on_pin_notice` (`MessageHandler(filters.StatusUpdate.PINNED_MESSAGE)`) deletes the
-service message when `from_user.id == bot.id` and the chat is a live chat; failures are logged at
-DEBUG only (needs the "Delete messages" right).
+### Monthly live renewal
+`refresh_live(bot, bd, snap, only_chat=None, *, renew=False)` runs under an asyncio lock in
+`bot_data`. A normal refresh only edits the live messages; it never replaces them because of age.
+With `renew=True` it replaces every entry:
+1. Best-effort `delete_message`; on `TelegramError`, best-effort `unpin_chat_message`.
+2. `send_photo` with the current caption and image (stored sample, no API call), silent.
+3. `pin_chat_message(disable_notification=True)`; a failure is not fatal.
+4. Store `{message_id, created_at: now}`.
+
+`renew_live_monthly(bot, bd, now, *, respect_time=False)` acts only on the local 1st, at or after
+`monthly_report_time`, and once per month (`KEY_LIVE_RENEWED` = `"YYYY-MM"`). It does nothing when
+`monthly_report_time` is empty. Telegram deletes only messages younger than 48 h, so the delete of a
+month-old message usually fails and the old photo stays unpinned in the chat history.
+
+A live message that a user deletes is re-created on the next refresh: the edit fails with "message
+to edit not found", and the bot sends and pins a new one.
+
+`on_pin_notice` (`MessageHandler(filters.StatusUpdate.PINNED_MESSAGE)`) deletes the service message
+when `from_user.id == bot.id` and the chat is a live chat. Failures are logged at DEBUG only (it
+needs the "Delete messages" right).
 
 ### Monthly statistics (`monthly.py`)
 - `SolarmanClient.daily_stats(station_id, start, end) -> list[DayStats]`: `POST
