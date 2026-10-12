@@ -983,6 +983,16 @@ async def _reset_live(bot: Any, chat_id: int, old_id: int, png: bytes, caption: 
     return message_id
 
 
+async def _rollover_live(bot: Any, chat_id: int, old_id: int, png: bytes, caption: str) -> int:
+    """New pinned live message after the old one became the monthly report (unpinned, kept)."""
+    try:
+        await bot.unpin_chat_message(chat_id=chat_id, message_id=old_id)
+    except TelegramError as e:
+        log.info("Cannot unpin the old live message in chat %s: %s", chat_id, e)
+    message_id, _ = await _send_live(bot, chat_id, png, caption)
+    return message_id
+
+
 async def refresh_live(
     bot: Any,
     bd: dict[str, Any],
@@ -998,7 +1008,12 @@ async def refresh_live(
 
 
 async def _refresh_live(
-    bot: Any, bd: dict[str, Any], snap: Snapshot | None, only_chat: int | None, renew: bool
+    bot: Any,
+    bd: dict[str, Any],
+    snap: Snapshot | None,
+    only_chat: int | None,
+    renew: bool,
+    keep: frozenset[str] = frozenset(),
 ) -> None:
     try:
         storage: Storage = bd["storage"]
@@ -1034,7 +1049,10 @@ async def _refresh_live(
         chat_id, message_id = int(key), entry["message_id"]
         try:
             if renew:
-                new_id = await _reset_live(bot, chat_id, message_id, png, caption)
+                if key in keep:  # the old message now holds the monthly report: keep it
+                    new_id = await _rollover_live(bot, chat_id, message_id, png, caption)
+                else:
+                    new_id = await _reset_live(bot, chat_id, message_id, png, caption)
                 updates[key] = _live_entry(new_id, now)
                 continue
             media = InputMediaPhoto(png, caption=caption, parse_mode=ParseMode.HTML)
@@ -1534,31 +1552,72 @@ async def _startup_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
     await refresh_live(context.bot, bd, latest_snapshot(bd))
 
 
-async def monthly_report_once(
+async def monthly_rollover(
     bot: Any, bd: dict[str, Any], now: datetime, *, respect_time: bool = False
-) -> bool:
-    """Post the previous month's report to the alert chat, on the 1st only and at most once.
+) -> None:
+    """On the 1st at MONTHLY_REPORT_TIME: the alert chat's live message (it showed the past month)
+    becomes the previous month's report, then a new live message is sent and pinned.
 
-    With respect_time (startup catch-up) nothing is posted before MONTHLY_REPORT_TIME.
-    Returns True if a report was posted.
+    Each step runs at most once per month (persisted). The report edit and the new live message
+    happen under the live lock, so a poll refresh cannot overwrite the report in between. Without
+    a live message in the alert chat (or if the edit fails) the report is posted as a new message.
+    A backend without monthly data only renews the live message. Report errors propagate (the
+    caller retries) and nothing is renewed before the report.
     """
     settings: Settings = bd["settings"]
     at = parse_hhmm(getattr(settings, "monthly_report_time", None))
     if at is None:
-        return False
+        return
     local = now.astimezone(settings.tz)
     if local.day != 1 or (respect_time and local.time() < at):
-        return False
-    year, month = previous_month(local.date())
+        return
     storage: Storage = bd["storage"]
-    if storage.get_json(KEY_MONTH_REPORTED) == month_key(year, month):
-        return False
-    png, caption = await build_month_report(bd, year, month, get_lang(bd), now)
-    await bot.send_photo(
-        chat_id=settings.alert_chat_id, photo=png, caption=caption, parse_mode=ParseMode.HTML
-    )
-    storage.set_json(KEY_MONTH_REPORTED, month_key(year, month))
-    return True
+    year, month = previous_month(local.date())
+    report_key, renew_key = month_key(year, month), month_key(local.year, local.month)
+    report_due = storage.get_json(KEY_MONTH_REPORTED) != report_key
+    renew_due = storage.get_json(KEY_LIVE_RENEWED) != renew_key
+    if not (report_due or renew_due):
+        return
+    report: tuple[bytes, str] | None = None
+    if report_due:
+        try:
+            report = await build_month_report(bd, year, month, get_lang(bd), now)
+        except SolarmanError as e:
+            if e.code != "unsupported":
+                raise
+            log.info("No monthly report for this backend; renewing the live message only")
+            storage.set_json(KEY_MONTH_REPORTED, report_key)
+    async with bd.setdefault("live_lock", asyncio.Lock()):
+        kept: frozenset[str] = frozenset()
+        if report is not None:
+            kept = await _post_month_report(bot, bd, report, into_live=renew_due)
+            storage.set_json(KEY_MONTH_REPORTED, report_key)
+        if renew_due:
+            await _refresh_live(bot, bd, latest_snapshot(bd), None, True, kept)
+            storage.set_json(KEY_LIVE_RENEWED, renew_key)
+            log.info("Monthly rollover done for %s", renew_key)
+
+
+async def _post_month_report(
+    bot: Any, bd: dict[str, Any], report: tuple[bytes, str], *, into_live: bool
+) -> frozenset[str]:
+    """Put the report into the alert chat's live message if possible, else post it as a new
+    message. Returns the live-message keys that now hold the report (to keep, not delete)."""
+    settings: Settings = bd["settings"]
+    png, caption = report
+    chat_id = settings.alert_chat_id
+    entry = _live_map(bd["storage"]).get(str(chat_id))
+    if into_live and entry:
+        media = InputMediaPhoto(png, caption=caption, parse_mode=ParseMode.HTML)
+        try:
+            await bot.edit_message_media(
+                media=media, chat_id=chat_id, message_id=entry["message_id"]
+            )
+            return frozenset({str(chat_id)})
+        except TelegramError as e:
+            log.info("Cannot turn the live message into the monthly report: %s", e)
+    await bot.send_photo(chat_id=chat_id, photo=png, caption=caption, parse_mode=ParseMode.HTML)
+    return frozenset()
 
 
 MONTHLY_RETRY_S = 1800
@@ -1566,47 +1625,13 @@ MONTHLY_RETRY_S = 1800
 
 async def _monthly(context: ContextTypes.DEFAULT_TYPE, *, respect_time: bool) -> None:
     bd = context.application.bot_data
-    now = datetime.now(UTC)
     try:
-        await monthly_report_once(context.bot, bd, now, respect_time=respect_time)
-    except SolarmanError as e:
-        if e.code != "unsupported":
-            _monthly_retry(context, e)
-            return  # renew only after the report, so the live message stays the last one
-        log.info("Monthly report not available for this backend")
+        await monthly_rollover(context.bot, bd, datetime.now(UTC), respect_time=respect_time)
     except Exception as e:
-        _monthly_retry(context, e)
-        return
-    await renew_live_monthly(context.bot, bd, now, respect_time=respect_time)
-
-
-def _monthly_retry(context: ContextTypes.DEFAULT_TYPE, e: Exception) -> None:
-    log.error("Monthly report failed (%s); retrying in %d s", e, MONTHLY_RETRY_S)
-    jq = getattr(context, "job_queue", None)
-    if jq is not None:
-        jq.run_once(monthly_startup_job, when=MONTHLY_RETRY_S, name="monthly_retry")
-
-
-async def renew_live_monthly(
-    bot: Any, bd: dict[str, Any], now: datetime, *, respect_time: bool = False
-) -> bool:
-    """On the 1st, after the monthly report: replace the pinned live message(s) by new ones so
-    they are the last message in the chat. Once per month (persisted). Returns True if done."""
-    settings: Settings = bd["settings"]
-    at = parse_hhmm(getattr(settings, "monthly_report_time", None))
-    if at is None:
-        return False
-    local = now.astimezone(settings.tz)
-    if local.day != 1 or (respect_time and local.time() < at):
-        return False
-    storage: Storage = bd["storage"]
-    key = month_key(local.year, local.month)
-    if storage.get_json(KEY_LIVE_RENEWED) == key:
-        return False
-    await refresh_live(bot, bd, latest_snapshot(bd), renew=True)
-    storage.set_json(KEY_LIVE_RENEWED, key)
-    log.info("Live message renewed for %s", key)
-    return True
+        log.error("Monthly report failed (%s); retrying in %d s", e, MONTHLY_RETRY_S)
+        jq = getattr(context, "job_queue", None)
+        if jq is not None:
+            jq.run_once(monthly_startup_job, when=MONTHLY_RETRY_S, name="monthly_retry")
 
 
 async def monthly_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:

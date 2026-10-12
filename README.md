@@ -27,8 +27,8 @@ SUN-xK-SG04LP3) through the Solarman Cloud OpenAPI. It runs in Docker on a small
 - `/month [YYYY-MM]`: grouped daily bars (solar, consumption, from grid) and monthly totals with
   the self-sufficiency percentage; a report of the previous month is posted automatically on the
   1st (OpenAPI backend). See "Monthly statistics".
-- A fresh pinned live message once a month, after the monthly report. See "Fresh live message
-  each month".
+- A monthly rollover: the old live message becomes the monthly report and a new live message is
+  pinned. See "Fresh live message each month".
 - Runtime threshold and language (English / Ukrainian) changes, persisted in SQLite.
 - 14 days of local samples are kept so charts still work if the cloud history call fails.
 
@@ -511,23 +511,30 @@ The first caption line is what Telegram shows in the pinned bar:
 ## Fresh live message each month
 
 The bot edits the pinned live message in place. An edit does not show as a new message in the
-chat. The bot replaces the live message by a new one only in these two cases:
+chat. The bot sends a new live message only in these two cases:
 
-1. **Once a month, after the monthly report.** On the 1st at `MONTHLY_REPORT_TIME` (default
-   09:00), the bot first posts the monthly report. Then it replaces the live message. The live
-   message is then the last message in the chat. If the report fails, the bot tries again after
-   30 minutes and replaces the live message only after the report. If the backend has no monthly
-   data (portal backend), the bot replaces the live message at that time without a report.
+1. **Once a month (the monthly rollover).** On the 1st at `MONTHLY_REPORT_TIME` (default 09:00):
+   1. The bot edits the old live message in the alert chat into the report of the past month
+      (chart and totals). The old message showed that month, so it becomes its archive.
+   2. The bot sends a new live message, pins it and unpins the old one.
+
+   The new live message is then the last message in the chat. Over time, the chat history has one
+   report for each month and the current pinned status at the bottom.
 2. **When a user deletes the live message.** The next refresh cannot edit the message. The bot
    then sends a new live message and pins it.
 
-The bot sends the new message and the pin silently (`disable_notification`).
+The bot sends the new message and the pin silently (`disable_notification`). The report edit also
+does not send a notification.
 
-- Telegram lets a bot delete only messages younger than 48 hours. The old live message is about one
-  month old, so the delete usually fails. The bot then unpins the old message and pins the new one.
-  The old photo stays in the chat history. An admin can delete it manually.
-- If `MONTHLY_REPORT_TIME` is empty, there is no monthly report and no monthly replacement.
-- If the bot is down on the 1st at that time, it does both steps after the start on the same day.
+- The edit has no age limit, so the 48-hour delete limit of Telegram does not apply.
+- If there is no live message in the alert chat, or the edit fails, the bot posts the report as a
+  new message. Then it replaces the live message.
+- If the report fails, the bot tries again after 30 minutes. It changes nothing before the report.
+- With the portal backend (no monthly data), the bot only replaces the live message.
+- If `MONTHLY_REPORT_TIME` is empty, there is no monthly report and no monthly rollover.
+- If the bot is down on the 1st at that time, it does the rollover after the start on the same day.
+- Live messages in other chats (from `/live`) get a new live message. The old one is deleted if
+  possible, else unpinned.
 - Every pin adds a "bot pinned a photo" service notice to the group. Give the bot the **Delete
   messages** admin right (together with "Pin Messages") to let it remove its own notices.
 

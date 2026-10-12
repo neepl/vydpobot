@@ -14,7 +14,7 @@ from vydpobot import bot as bot_mod
 from vydpobot.config import Settings
 from vydpobot.i18n import t
 from vydpobot.models import BatteryState, Snapshot
-from vydpobot.storage import KEY_LIVE_MESSAGES, Storage
+from vydpobot.storage import KEY_LIVE_MESSAGES, KEY_LIVE_RENEWED, KEY_MONTH_REPORTED, Storage
 
 ADMIN, USER, CHAT = 7, 8, -100
 PNG = b"\x89PNG\r\n\x1a\n"
@@ -175,6 +175,7 @@ class FakeBot:
         if err := self.edit_errors.get(chat_id):
             raise err
         assert media.media is not None
+        self.calls.append("edit")
         self.edits.append((chat_id, message_id, media.caption))
 
 
@@ -565,66 +566,99 @@ def first_of_month(hour=9, minute=5):
     return datetime(2026, 11, 1, hour, minute, tzinfo=TZ).astimezone(UTC)
 
 
-async def test_monthly_renewal_on_the_first_once(env):
+@pytest.fixture
+def rollover(env, monkeypatch):
+    """Monthly rollover setup: report time 09:00, a stored sample, a fake report."""
     env.bd["settings"].monthly_report_time = "09:00"
-    seed_at(env, yesterday(), CHAT, -200)
     env.storage.add_sample(snap())
-    assert await bot_mod.renew_live_monthly(env.bot, env.bd, first_of_month())
-    assert env.bot.deleted == [(CHAT, 900), (-200, 901)]
+    built = []
+
+    async def report(bd, year, month, lang, now):
+        built.append((year, month))
+        return PNG, f"report {year}-{month:02d}"
+
+    monkeypatch.setattr(bot_mod, "build_month_report", report)
+    env.built = built
+    return env
+
+
+async def test_rollover_turns_live_message_into_report_and_pins_new(rollover):
+    env = rollover
+    seed_at(env, yesterday(), CHAT, -200)  # CHAT is the alert chat
+    await bot_mod.monthly_rollover(env.bot, env.bd, first_of_month())
+    assert env.built == [(2026, 10)]
+    # alert chat: the old live message becomes October's report (edited in place, kept)
+    assert env.bot.edits[0] == (CHAT, 900, "report 2026-10")
+    assert (CHAT, 900) in env.bot.unpins and (CHAT, 900) not in env.bot.deleted
+    # the other live chat gets a plain replacement (its old message is deleted)
+    assert env.bot.deleted == [(-200, 901)]
+    # both chats get a new pinned live message, after the report
     assert [p[0] for p in env.bot.photos] == [CHAT, -200]
+    assert env.bot.calls.index("edit") < env.bot.calls.index("send_photo")
     assert live(env) == {str(CHAT): 501, "-200": 502}
-    assert env.source.calls == 0
-    # once per month, also after a restart (persisted)
-    assert not await bot_mod.renew_live_monthly(env.bot, env.bd, first_of_month(15))
-    assert len(env.bot.photos) == 2
+    assert env.storage.get_json(KEY_LIVE_RENEWED) == "2026-11"
+    assert env.storage.get_json(KEY_MONTH_REPORTED) == "2026-10"
+    # once per month (persisted)
+    await bot_mod.monthly_rollover(env.bot, env.bd, first_of_month(15))
+    assert len(env.bot.photos) == 2 and env.built == [(2026, 10)]
 
 
-async def test_monthly_renewal_only_on_the_first_and_after_the_time(env):
-    env.bd["settings"].monthly_report_time = "09:00"
+async def test_rollover_without_live_message_posts_report(rollover):
+    env = rollover
+    await bot_mod.monthly_rollover(env.bot, env.bd, first_of_month())
+    assert env.bot.photos == [(CHAT, "report 2026-10")] and not env.bot.edits
+
+
+async def test_rollover_edit_failure_posts_report_then_replaces(rollover):
+    env = rollover
     seed_at(env, yesterday(), CHAT)
-    second = datetime(2026, 11, 2, 9, 5, tzinfo=TZ).astimezone(UTC)
-    assert not await bot_mod.renew_live_monthly(env.bot, env.bd, second)
-    early = first_of_month(8, 30)
-    assert not await bot_mod.renew_live_monthly(env.bot, env.bd, early, respect_time=True)
-    assert not env.bot.photos
+    env.bot.edit_errors[CHAT] = BadRequest("Message to edit not found")
+    await bot_mod.monthly_rollover(env.bot, env.bd, first_of_month())
+    assert env.bot.photos[0] == (CHAT, "report 2026-10")  # report as a new message
+    assert env.bot.deleted == [(CHAT, 900)]  # old live message replaced normally
+    assert live(env) == {str(CHAT): 502}
 
 
-async def test_monthly_renewal_disabled_without_report_time(env):
-    env.bd["settings"].monthly_report_time = None
-    seed_at(env, datetime.now(UTC) - timedelta(days=30), CHAT)
-    assert not await bot_mod.renew_live_monthly(env.bot, env.bd, first_of_month())
-    assert not env.bot.photos and not env.bot.deleted
-
-
-@pytest.mark.parametrize("outcome", ["posted", "unsupported", "failed"])
-async def test_monthly_job_renews_live_only_after_the_report(env, monkeypatch, outcome):
+async def test_rollover_unsupported_backend_only_renews(rollover, monkeypatch):
     from vydpobot.solarman.client import SolarmanError
 
-    order, queued = [], []
+    env = rollover
 
-    async def report(bot, bd, now, *, respect_time=False):
-        order.append("report")
-        if outcome == "unsupported":
-            raise SolarmanError("no monthly data", "unsupported")
-        if outcome == "failed":
-            raise SolarmanError("timeout", "500")
-        return True
+    async def no_data(*a, **k):
+        raise SolarmanError("monthly statistics require the openapi backend", "unsupported")
 
-    async def renew(bot, bd, now, *, respect_time=False):
-        order.append("renew")
-        return True
+    monkeypatch.setattr(bot_mod, "build_month_report", no_data)
+    seed_at(env, yesterday(), CHAT)
+    await bot_mod.monthly_rollover(env.bot, env.bd, first_of_month())
+    assert not env.bot.edits and env.bot.deleted == [(CHAT, 900)]
+    assert live(env) == {str(CHAT): 501}
 
-    monkeypatch.setattr(bot_mod, "monthly_report_once", report)
-    monkeypatch.setattr(bot_mod, "renew_live_monthly", renew)
-    jq = SimpleNamespace(run_once=lambda cb, when, **kw: queued.append(cb))
-    context = SimpleNamespace(
-        application=SimpleNamespace(bot_data=env.bd), bot=env.bot, job_queue=jq
-    )
-    await bot_mod._monthly(context, respect_time=False)
-    if outcome == "failed":
-        assert order == ["report"] and queued == [bot_mod.monthly_startup_job]
-    else:
-        assert order == ["report", "renew"] and not queued  # live message is the last one
+
+async def test_rollover_report_failure_renews_nothing(rollover, monkeypatch):
+    from vydpobot.solarman.client import SolarmanError
+
+    env = rollover
+
+    async def boom(*a, **k):
+        raise SolarmanError("timeout", "500")
+
+    monkeypatch.setattr(bot_mod, "build_month_report", boom)
+    seed_at(env, yesterday(), CHAT)
+    with pytest.raises(SolarmanError):
+        await bot_mod.monthly_rollover(env.bot, env.bd, first_of_month())
+    assert not env.bot.photos and not env.bot.edits
+    assert env.storage.get_json(KEY_LIVE_RENEWED) is None
+
+
+async def test_rollover_only_on_the_first_after_the_time(rollover):
+    env = rollover
+    seed_at(env, yesterday(), CHAT)
+    second = datetime(2026, 11, 2, 9, 5, tzinfo=TZ).astimezone(UTC)
+    await bot_mod.monthly_rollover(env.bot, env.bd, second)
+    await bot_mod.monthly_rollover(env.bot, env.bd, first_of_month(8, 30), respect_time=True)
+    env.bd["settings"].monthly_report_time = None
+    await bot_mod.monthly_rollover(env.bot, env.bd, first_of_month())
+    assert not env.bot.photos and not env.bot.edits and not env.built
 
 
 async def test_live_command_stores_created_at(env):

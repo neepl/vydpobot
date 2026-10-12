@@ -292,23 +292,28 @@ Jobs:
   after 3 consecutive poll failures send one `alert.stale`-like error note (reuse staleness flag).
 - `prune` daily: keep 14 days of samples.
 - `monthly_report` (`run_daily` at `monthly_report_time`) + `monthly_startup` (once, 20 s after
-  start, respects the time of day) -> `monthly_report_once`, then `renew_live_monthly`. A report
-  failure schedules a retry in 30 min and skips the renewal, so the live message comes after the
-  report. A `SolarmanError` with code `unsupported` (portal backend) does not block the renewal.
+  start, respects the time of day) -> `monthly_rollover`. A report failure schedules a retry in
+  30 min and changes nothing before the report.
 
-### Monthly live renewal
+### Monthly rollover
 `refresh_live(bot, bd, snap, only_chat=None, *, renew=False)` runs under an asyncio lock in
 `bot_data`. A normal refresh only edits the live messages; it never replaces them because of age.
-With `renew=True` it replaces every entry:
-1. Best-effort `delete_message`; on `TelegramError`, best-effort `unpin_chat_message`.
-2. `send_photo` with the current caption and image (stored sample, no API call), silent.
-3. `pin_chat_message(disable_notification=True)`; a failure is not fatal.
-4. Store `{message_id, created_at: now}`.
 
-`renew_live_monthly(bot, bd, now, *, respect_time=False)` acts only on the local 1st, at or after
-`monthly_report_time`, and once per month (`KEY_LIVE_RENEWED` = `"YYYY-MM"`). It does nothing when
-`monthly_report_time` is empty. Telegram deletes only messages younger than 48 h, so the delete of a
-month-old message usually fails and the old photo stays unpinned in the chat history.
+`monthly_rollover(bot, bd, now, *, respect_time=False)` acts only on the local 1st, at or after
+`monthly_report_time` (nothing when it is empty). Two steps, each once per month (persisted):
+- Report (`KEY_MONTH_REPORTED` = previous `"YYYY-MM"`): `build_month_report`. A `SolarmanError` with
+  code `unsupported` (portal backend) marks the month as done without a report. Other errors
+  propagate, and nothing changes.
+- Renewal (`KEY_LIVE_RENEWED` = current `"YYYY-MM"`).
+
+Both steps run under the live lock, so a poll refresh cannot overwrite the report in between:
+1. `_post_month_report`: `edit_message_media` of the alert chat's live message into the report.
+   That message is then kept. If there is no live message or the edit fails, `send_photo` the
+   report as a new message.
+2. `_refresh_live(..., renew=True, keep=...)`: for a kept chat, `_rollover_live` (unpin the old
+   message, send and pin a new one). For other chats, `_reset_live` (best-effort delete, else
+   unpin, then send and pin a new one). New messages and pins are silent. Store
+   `{message_id, created_at: now}`.
 
 A live message that a user deletes is re-created on the next refresh: the edit fails with "message
 to edit not found", and the bot sends and pins a new one.

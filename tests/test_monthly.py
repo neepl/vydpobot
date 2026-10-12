@@ -482,7 +482,10 @@ def job_ctx(env):
 
 
 async def run_job(env, now, respect_time=False):
-    return await bot_mod.monthly_report_once(env.bot, env.bd, now, respect_time=respect_time)
+    """True if this call posted the monthly report (no live message here: a new message)."""
+    before = env.storage.get_json(KEY_MONTH_REPORTED)
+    await bot_mod.monthly_rollover(env.bot, env.bd, now, respect_time=respect_time)
+    return env.storage.get_json(KEY_MONTH_REPORTED) != before
 
 
 async def test_report_posts_previous_month_once(env):
