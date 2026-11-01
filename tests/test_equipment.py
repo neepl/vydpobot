@@ -735,6 +735,9 @@ def _post_init_env(env, monkeypatch, tmp_path, **kw):
         async def set_my_commands(self, cmds, **k):
             B.commands.append([c.command for c in cmds])
 
+        async def get_chat(self, chat_id):
+            return SimpleNamespace(id=chat_id)
+
     app = SimpleNamespace(bot_data={"settings": s}, bot=B(), job_queue=JQ())
     return app, jobs, B
 

@@ -309,13 +309,17 @@ Jobs:
 - Renewal (`KEY_LIVE_RENEWED` = current `"YYYY-MM"`).
 
 Both steps run under the live lock, so a poll refresh cannot overwrite the report in between:
-1. `_post_month_report`: `edit_message_media` of the alert chat's live message into the report.
-   That message is then kept. If there is no live message or the edit fails, `send_photo` the
-   report as a new message.
+1. `_post_month_report`: targets are all chats with a live message (`ALERT_CHAT_ID` only when
+   there is none; nothing when that is 0). In each chat, `edit_message_media` of the live message
+   into the report (kept), else `send_photo` the report as a new message. It raises only when no
+   chat received the report.
 2. `_refresh_live(..., renew=True, keep=...)`: for a kept chat, `_rollover_live` (unpin the old
    message, send and pin a new one). For other chats, `_reset_live` (best-effort delete, else
    unpin, then send and pin a new one). New messages and pins are silent. Store
    `{message_id, created_at: now}`.
+
+Startup: `check_alert_chat` logs an error (with the live chats as a hint) and tells the admins
+privately when `ALERT_CHAT_ID` is 0 or `get_chat` fails.
 
 A live message that a user deletes is re-created on the next refresh: the edit fails with "message
 to edit not found", and the bot sends and pins a new one.

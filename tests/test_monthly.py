@@ -571,6 +571,9 @@ async def test_post_init_schedules_jobs(env, monkeypatch, tmp_path):
         async def set_my_commands(self, *a, **k):
             pass
 
+        async def get_chat(self, chat_id):
+            return SimpleNamespace(id=chat_id)
+
     app = SimpleNamespace(bot_data={"settings": env.settings}, bot=B(), job_queue=JQ())
     await bot_mod._post_init(app)
     app.bot_data["storage"].close()

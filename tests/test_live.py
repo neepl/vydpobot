@@ -472,6 +472,9 @@ async def test_post_init_schedules_startup_refresh(env, monkeypatch, tmp_path):
         async def set_my_commands(self, *a, **k):
             pass
 
+        async def get_chat(self, chat_id):
+            return SimpleNamespace(id=chat_id)
+
     app = SimpleNamespace(bot_data={"settings": env.bd["settings"]}, bot=B(), job_queue=JQ())
     await bot_mod._post_init(app)
     once = [o for o in once if o[0] not in (bot_mod.balance_job, bot_mod.monthly_startup_job)]
@@ -587,11 +590,9 @@ async def test_rollover_turns_live_message_into_report_and_pins_new(rollover):
     seed_at(env, yesterday(), CHAT, -200)  # CHAT is the alert chat
     await bot_mod.monthly_rollover(env.bot, env.bd, first_of_month())
     assert env.built == [(2026, 10)]
-    # alert chat: the old live message becomes October's report (edited in place, kept)
-    assert env.bot.edits[0] == (CHAT, 900, "report 2026-10")
-    assert (CHAT, 900) in env.bot.unpins and (CHAT, 900) not in env.bot.deleted
-    # the other live chat gets a plain replacement (its old message is deleted)
-    assert env.bot.deleted == [(-200, 901)]
+    # every live chat: the old live message becomes October's report (edited in place, kept)
+    assert env.bot.edits[:2] == [(CHAT, 900, "report 2026-10"), (-200, 901, "report 2026-10")]
+    assert {(CHAT, 900), (-200, 901)} <= set(env.bot.unpins) and not env.bot.deleted
     # both chats get a new pinned live message, after the report
     assert [p[0] for p in env.bot.photos] == [CHAT, -200]
     assert env.bot.calls.index("edit") < env.bot.calls.index("send_photo")
@@ -601,6 +602,23 @@ async def test_rollover_turns_live_message_into_report_and_pins_new(rollover):
     # once per month (persisted)
     await bot_mod.monthly_rollover(env.bot, env.bd, first_of_month(15))
     assert len(env.bot.photos) == 2 and env.built == [(2026, 10)]
+
+
+async def test_rollover_report_goes_to_live_chat_even_without_alert_chat(rollover):
+    env = rollover
+    env.bd["settings"].alert_chat_id = 0  # placeholder: the live chat still gets the report
+    seed_at(env, yesterday(), -200)
+    await bot_mod.monthly_rollover(env.bot, env.bd, first_of_month())
+    assert env.bot.edits[0] == (-200, 900, "report 2026-10")
+    assert [p[0] for p in env.bot.photos] == [-200]  # the new live message
+
+
+async def test_rollover_without_any_target_does_not_retry_forever(rollover):
+    env = rollover
+    env.bd["settings"].alert_chat_id = 0
+    await bot_mod.monthly_rollover(env.bot, env.bd, first_of_month())  # no exception
+    assert not env.bot.photos and not env.bot.edits
+    assert env.storage.get_json(KEY_MONTH_REPORTED) == "2026-10"
 
 
 async def test_rollover_without_live_message_posts_report(rollover):
@@ -731,3 +749,31 @@ async def test_live_message_and_pin_are_silent(env):
     await run_cmd(env, [])
     assert env.bot.photo_silent == [True]
     assert all(p[2] is True for p in env.bot.pins)
+
+
+# ------------------------------------------------------------------ ALERT_CHAT_ID startup check
+
+
+@pytest.mark.parametrize(
+    "chat_id, reachable, ok", [(0, True, False), (CHAT, False, False), (CHAT, True, True)]
+)
+async def test_check_alert_chat(env, caplog, chat_id, reachable, ok):
+    env.bd["settings"].alert_chat_id = chat_id
+    seed(env, -200)
+    sent = []
+
+    class B:
+        async def get_chat(self, chat_id):
+            if not reachable:
+                raise BadRequest("Chat not found")
+
+        async def send_message(self, chat_id, text, **kw):
+            sent.append((chat_id, text))
+
+    with caplog.at_level("ERROR", logger=bot_mod.log.name):
+        assert await bot_mod.check_alert_chat(B(), env.bd["settings"], env.storage) is ok
+    if ok:
+        assert not sent and "ALERT_CHAT_ID" not in caplog.text
+    else:
+        assert "ALERT_CHAT_ID" in caplog.text and "-200" in caplog.text  # hint: the live chat
+        assert [c for c, _ in sent] == [ADMIN]

@@ -1499,6 +1499,29 @@ async def cmd_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # --------------------------------------------------------------------------- jobs
 
 
+async def check_alert_chat(bot: Any, settings: Settings, storage: Storage) -> bool:
+    """Startup check that ALERT_CHAT_ID is a reachable chat. Logs a clear error with a hint (the
+    chats that hold live messages) and tells the admins privately. Never raises."""
+    chat_id = settings.alert_chat_id
+    reason = "is 0 (placeholder)" if chat_id == 0 else None
+    if reason is None:
+        try:
+            await bot.get_chat(chat_id=chat_id)
+            return True
+        except TelegramError as e:
+            reason = f"is not reachable ({e})"
+    hint = ", ".join(_live_map(storage)) or "none yet"
+    text = (
+        f"ALERT_CHAT_ID={chat_id} {reason}: alerts and the monthly report cannot be delivered. "
+        f"Set it to the group ID (chats with a live message: {hint}) and restart."
+    )
+    log.error(text)
+    for admin in settings.admin_user_ids:
+        with suppress(TelegramError):
+            await bot.send_message(chat_id=admin, text=f"⚠️ {html.escape(text)}")
+    return False
+
+
 def admin_targets(settings: Settings) -> list[int]:
     """Private chats of the admins (chat id == user id); the alert chat if there are none."""
     return list(settings.admin_user_ids) or [settings.alert_chat_id]
@@ -1564,12 +1587,13 @@ async def _startup_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def monthly_rollover(
     bot: Any, bd: dict[str, Any], now: datetime, *, respect_time: bool = False
 ) -> None:
-    """On the 1st at MONTHLY_REPORT_TIME: the alert chat's live message (it showed the past month)
-    becomes the previous month's report, then a new live message is sent and pinned.
+    """On the 1st at MONTHLY_REPORT_TIME: in every chat with a live message, the old live message
+    (it showed the past month) becomes the previous month's report, then a new live message is
+    sent and pinned. Without any live message the report goes to ALERT_CHAT_ID.
 
     Each step runs at most once per month (persisted). The report edit and the new live message
-    happen under the live lock, so a poll refresh cannot overwrite the report in between. Without
-    a live message in the alert chat (or if the edit fails) the report is posted as a new message.
+    happen under the live lock, so a poll refresh cannot overwrite the report in between. If an
+    edit fails, the report is posted in that chat as a new message.
     A backend without monthly data only renews the live message. Report errors propagate (the
     caller retries) and nothing is renewed before the report.
     """
@@ -1610,23 +1634,46 @@ async def monthly_rollover(
 async def _post_month_report(
     bot: Any, bd: dict[str, Any], report: tuple[bytes, str], *, into_live: bool
 ) -> frozenset[str]:
-    """Put the report into the alert chat's live message if possible, else post it as a new
-    message. Returns the live-message keys that now hold the report (to keep, not delete)."""
+    """Deliver the report to every chat with a live message (ALERT_CHAT_ID only when there is
+    none). In each chat the old live message becomes the report if possible, else the report is
+    posted as a new message. Returns the live-message keys that now hold the report (keep them).
+
+    Raises only when no chat received the report (the caller retries). Without any target chat
+    (no live message and ALERT_CHAT_ID 0) it logs a warning and returns.
+    """
     settings: Settings = bd["settings"]
     png, caption = report
-    chat_id = settings.alert_chat_id
-    entry = _live_map(bd["storage"]).get(str(chat_id))
-    if into_live and entry:
-        media = InputMediaPhoto(png, caption=caption, parse_mode=ParseMode.HTML)
+    live = _live_map(bd["storage"])
+    targets = list(live) or ([str(settings.alert_chat_id)] if settings.alert_chat_id else [])
+    if not targets:
+        log.warning("Monthly report: no chat with a live message and ALERT_CHAT_ID is 0")
+        return frozenset()
+    kept: set[str] = set()
+    delivered, error = 0, None
+    for key in targets:
+        chat_id, entry = int(key), live.get(key)
+        if into_live and entry:
+            media = InputMediaPhoto(png, caption=caption, parse_mode=ParseMode.HTML)
+            try:
+                await bot.edit_message_media(
+                    media=media, chat_id=chat_id, message_id=entry["message_id"]
+                )
+                kept.add(key)
+                delivered += 1
+                continue
+            except TelegramError as e:
+                log.info("Cannot turn the live message in chat %s into the report: %s", key, e)
         try:
-            await bot.edit_message_media(
-                media=media, chat_id=chat_id, message_id=entry["message_id"]
+            await bot.send_photo(
+                chat_id=chat_id, photo=png, caption=caption, parse_mode=ParseMode.HTML
             )
-            return frozenset({str(chat_id)})
+            delivered += 1
         except TelegramError as e:
-            log.info("Cannot turn the live message into the monthly report: %s", e)
-    await bot.send_photo(chat_id=chat_id, photo=png, caption=caption, parse_mode=ParseMode.HTML)
-    return frozenset()
+            log.warning("Cannot post the monthly report in chat %s: %s", key, e)
+            error = e
+    if not delivered and error is not None:
+        raise error
+    return frozenset(kept)
 
 
 MONTHLY_RETRY_S = 1800
@@ -1716,6 +1763,7 @@ async def _post_init(app: Application) -> None:
         log.warning(warning)
     equipment = make_equipment(settings)
     app.bot_data["equipment"] = equipment
+    await check_alert_chat(app.bot, settings, storage)
     await app.bot.set_my_commands(_commands("en"))
     await app.bot.set_my_commands(_commands("uk"), language_code="uk")
     assert app.job_queue is not None

@@ -514,8 +514,9 @@ The bot edits the pinned live message in place. An edit does not show as a new m
 chat. The bot sends a new live message only in these two cases:
 
 1. **Once a month (the monthly rollover).** On the 1st at `MONTHLY_REPORT_TIME` (default 09:00):
-   1. The bot edits the old live message in the alert chat into the report of the past month
-      (chart and totals). The old message showed that month, so it becomes its archive.
+   1. In every chat with a live message, the bot edits the old live message into the report of
+      the past month (chart and totals). The old message showed that month, so it becomes its
+      archive. Without any live message, the bot posts the report to `ALERT_CHAT_ID`.
    2. The bot sends a new live message, pins it and unpins the old one.
 
    The new live message is then the last message in the chat. Over time, the chat history has one
@@ -527,14 +528,12 @@ The bot sends the new message and the pin silently (`disable_notification`). The
 does not send a notification.
 
 - The edit has no age limit, so the 48-hour delete limit of Telegram does not apply.
-- If there is no live message in the alert chat, or the edit fails, the bot posts the report as a
-  new message. Then it replaces the live message.
+- If the edit fails in a chat, the bot posts the report in that chat as a new message. Then it
+  replaces the live message.
 - If the report fails, the bot tries again after 30 minutes. It changes nothing before the report.
 - With the portal backend (no monthly data), the bot only replaces the live message.
 - If `MONTHLY_REPORT_TIME` is empty, there is no monthly report and no monthly rollover.
 - If the bot is down on the 1st at that time, it does the rollover after the start on the same day.
-- Live messages in other chats (from `/live`) get a new live message. The old one is deleted if
-  possible, else unpinned.
 - Every pin adds a "bot pinned a photo" service notice to the group. Give the bot the **Delete
   messages** admin right (together with "Pin Messages") to let it remove its own notices.
 
