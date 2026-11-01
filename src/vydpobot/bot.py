@@ -4,7 +4,7 @@ import asyncio
 import html
 import logging
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
@@ -130,11 +130,20 @@ def is_admin(user_id: int | None, settings: Settings) -> bool:
     return user_id is not None and user_id in settings.admin_user_ids
 
 
-def is_allowed(chat_id: int, chat_type: str, user_id: int | None, settings: Settings) -> bool:
-    """Read-only access: alert chat, allowed chats, or private chats of admins."""
-    if chat_id == settings.alert_chat_id or chat_id in settings.allowed_chat_ids:
+def is_allowed(
+    chat_id: int,
+    chat_type: str,
+    user_id: int | None,
+    settings: Settings,
+    live_chats: Collection[int] = (),
+) -> bool:
+    """Read-only access: chats with a live message, ALERT_CHAT_ID, ALLOWED_CHAT_IDS; admins
+    anywhere (so an admin can send /live in a new group without configuring its ID)."""
+    if chat_id in live_chats or chat_id in settings.allowed_chat_ids:
         return True
-    return chat_type == ChatType.PRIVATE and is_admin(user_id, settings)
+    if settings.alert_chat_id and chat_id == settings.alert_chat_id:
+        return True
+    return is_admin(user_id, settings)
 
 
 def _num(x: float) -> str:
@@ -1111,10 +1120,11 @@ async def _guard(update: Update, bot_data: dict[str, Any], *, admin: bool = Fals
     if chat is None:
         return False
     uid = user.id if user else None
-    if not is_allowed(chat.id, chat.type, uid, settings):
+    live = [int(k) for k in _live_map(bot_data["storage"])]
+    if not is_allowed(chat.id, chat.type, uid, settings, live):
         log.info(
             "Ignored command from chat_id=%s (%s %r), user_id=%s. "
-            "To allow it, set ALERT_CHAT_ID or add it to ALLOWED_CHAT_IDS.",
+            "To allow it, send /live there as an admin or add it to ALLOWED_CHAT_IDS.",
             chat.id,
             chat.type,
             chat.title or chat.username or "",
@@ -1500,21 +1510,23 @@ async def cmd_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def check_alert_chat(bot: Any, settings: Settings, storage: Storage) -> bool:
-    """Startup check that ALERT_CHAT_ID is a reachable chat. Logs a clear error with a hint (the
-    chats that hold live messages) and tells the admins privately. Never raises."""
-    chat_id = settings.alert_chat_id
-    reason = "is 0 (placeholder)" if chat_id == 0 else None
-    if reason is None:
-        try:
-            await bot.get_chat(chat_id=chat_id)
-            return True
-        except TelegramError as e:
-            reason = f"is not reachable ({e})"
-    hint = ", ".join(_live_map(storage)) or "none yet"
-    text = (
-        f"ALERT_CHAT_ID={chat_id} {reason}: alerts and the monthly report cannot be delivered. "
-        f"Set it to the group ID (chats with a live message: {hint}) and restart."
-    )
+    """Startup check of where automatic messages go (see delivery_chats). Logs the result; a set
+    but unreachable ALERT_CHAT_ID is an error and the admins are told privately. Never raises."""
+    chat_id, live = settings.alert_chat_id, list(_live_map(storage))
+    if live:
+        log.info("Automatic messages go to the chat(s) with a live message: %s", ", ".join(live))
+    if chat_id == 0:
+        if not live:
+            log.warning("No chat for alerts yet: send /live in the group (or set ALERT_CHAT_ID).")
+        return bool(live)
+    try:
+        await bot.get_chat(chat_id=chat_id)
+        return True
+    except TelegramError as e:
+        text = (
+            f"ALERT_CHAT_ID={chat_id} is not reachable ({e}). It is only a fallback when no "
+            f"chat has a live message (now: {', '.join(live) or 'none'}); fix or remove it."
+        )
     log.error(text)
     for admin in settings.admin_user_ids:
         with suppress(TelegramError):
@@ -1522,9 +1534,27 @@ async def check_alert_chat(bot: Any, settings: Settings, storage: Storage) -> bo
     return False
 
 
-def admin_targets(settings: Settings) -> list[int]:
-    """Private chats of the admins (chat id == user id); the alert chat if there are none."""
-    return list(settings.admin_user_ids) or [settings.alert_chat_id]
+def delivery_chats(bd: dict[str, Any]) -> list[int]:
+    """Where automatic messages go: every chat with a live message; ALERT_CHAT_ID only when there
+    is none (nothing when it is 0)."""
+    live = [int(k) for k in _live_map(bd["storage"])]
+    alert = bd["settings"].alert_chat_id
+    return live or ([alert] if alert else [])
+
+
+async def broadcast(bot: Any, chats: list[int], messages: list[str]) -> None:
+    """Send each HTML message to each chat; a failing chat does not stop the others."""
+    for chat_id in chats:
+        for msg in messages:
+            try:
+                await bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.HTML)
+            except TelegramError as e:
+                log.warning("Cannot send to chat %s: %s", chat_id, e)
+
+
+def admin_targets(bd: dict[str, Any]) -> list[int]:
+    """Private chats of the admins (chat id == user id); the delivery chats if there are none."""
+    return list(bd["settings"].admin_user_ids) or delivery_chats(bd)
 
 
 async def poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1532,14 +1562,10 @@ async def poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     result = PollResult()
     try:
         result = await poll_once(bd, datetime.now(UTC))
-        settings: Settings = bd["settings"]
-        for msg in result.alerts:
-            await context.bot.send_message(
-                chat_id=settings.alert_chat_id, text=msg, parse_mode=ParseMode.HTML
-            )
-        for chat_id in admin_targets(settings) if result.admin_notices else ():
-            for msg in result.admin_notices:
-                await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.HTML)
+        if result.alerts:
+            await broadcast(context.bot, delivery_chats(bd), result.alerts)
+        if result.admin_notices:
+            await broadcast(context.bot, admin_targets(bd), result.admin_notices)
     except Exception:
         log.exception("Poll job failed")
     try:
@@ -1553,9 +1579,8 @@ async def balance_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     bd = context.application.bot_data
     try:
         notices = await balance_once(bd, datetime.now(UTC))
-        for chat_id in admin_targets(bd["settings"]) if notices else ():
-            for msg in notices:
-                await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.HTML)
+        if notices:
+            await broadcast(context.bot, admin_targets(bd), notices)
     except Exception:
         log.exception("Balance job failed")
 
@@ -1564,14 +1589,10 @@ async def equipment_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     bd = context.application.bot_data
     try:
         result = await equipment_once(bd, datetime.now(UTC))
-        settings: Settings = bd["settings"]
-        for msg in result.alerts:
-            await context.bot.send_message(
-                chat_id=settings.alert_chat_id, text=msg, parse_mode=ParseMode.HTML
-            )
-        for chat_id in admin_targets(settings) if result.admin_notices else ():
-            for msg in result.admin_notices:
-                await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.HTML)
+        if result.alerts:
+            await broadcast(context.bot, delivery_chats(bd), result.alerts)
+        if result.admin_notices:
+            await broadcast(context.bot, admin_targets(bd), result.admin_notices)
         if result.refresh:
             await refresh_live(context.bot, bd, latest_snapshot(bd))
     except Exception:
@@ -1641,10 +1662,9 @@ async def _post_month_report(
     Raises only when no chat received the report (the caller retries). Without any target chat
     (no live message and ALERT_CHAT_ID 0) it logs a warning and returns.
     """
-    settings: Settings = bd["settings"]
     png, caption = report
     live = _live_map(bd["storage"])
-    targets = list(live) or ([str(settings.alert_chat_id)] if settings.alert_chat_id else [])
+    targets = [str(c) for c in delivery_chats(bd)]
     if not targets:
         log.warning("Monthly report: no chat with a live message and ALERT_CHAT_ID is 0")
         return frozenset()

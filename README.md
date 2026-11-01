@@ -222,7 +222,7 @@ inverter losses.
 ### When the token stops working
 
 If the portal rejects the token, the bot stops calling the portal and sends **one** message to
-the admins (private chats of `ADMIN_USER_IDS`, or `ALERT_CHAT_ID` if none are set) with the
+the admins (private chats of `ADMIN_USER_IDS`, else the chats with a live message) with the
 capture steps. Repeat the steps above, then send the new value to the bot **in a private chat**:
 
 ```
@@ -301,19 +301,25 @@ The free OpenAPI tier for Smart accounts allows at most 3 plants and 200 000 cal
 
 ### Chat and user IDs
 
-- Your user ID: message [@userinfobot](https://t.me/userinfobot). For a private alert chat,
-  `ALERT_CHAT_ID` is your user ID.
-- Group ID (easiest): start the bot, add it to the group and send `/status@your_bot` there.
-  The bot ignores the unknown chat and logs
-  `Ignored command from chat_id=-100… (supergroup 'Your group')`. Put that number in
-  `ALERT_CHAT_ID` and restart. Group IDs are negative; supergroups look like `-100…`.
-  Changing some group settings converts a group into a supergroup and **changes its ID**. If
-  alerts stop arriving, repeat this step.
-  Alternative: stop the bot, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` and read
-  `message.chat.id` (`getUpdates` conflicts with a running bot).
-- Set `ADMIN_USER_IDS` to the user IDs allowed to change settings (`/threshold <n>`,
-  `/lang <en|uk>`). Anyone in `ALERT_CHAT_ID` or `ALLOWED_CHAT_IDS` can use `/status`,
-  `/graph`, and view settings.
+You do not need the group ID.
+
+1. Get your user ID from [@userinfobot](https://t.me/userinfobot). Put it in `ADMIN_USER_IDS`.
+2. Add the bot to the group.
+3. In the group, send `/live` (as an admin). The bot pins the live message there.
+
+From then on, every automatic message goes to the chats with a live message: battery alerts,
+"no fresh data" warnings, equipment alerts and the monthly report. Commands work in those chats
+for everyone. Admins can use commands in any chat.
+
+- `ALERT_CHAT_ID` is optional. The bot uses it only when no chat has a live message. At startup the
+  bot logs where automatic messages go, and it logs an error if `ALERT_CHAT_ID` is set but
+  Telegram cannot find the chat.
+- `ALLOWED_CHAT_IDS` lets more chats use the read-only commands (`/status`, `/graph`, `/month`,
+  `/health`).
+- To find a chat ID anyway: send `/status@your_bot` in the chat as a non-admin. The bot logs
+  `Ignored command from chat_id=-100… (supergroup 'Your group')`. Group IDs are negative;
+  supergroups look like `-100…`. Some group settings convert a group into a supergroup and
+  change its ID.
 
 ## Configuration
 
@@ -470,8 +476,9 @@ docker compose exec vydpobot python -c "import sqlite3; s=sqlite3.connect('/app/
 | `/health` | allowed chats | State of the building equipment monitored via healthchecks.io |
 | `/token <value>` | admins, private chat | Portal backend only, hidden: supply a new refresh token |
 
-Access: read-only commands work in `ALERT_CHAT_ID`, `ALLOWED_CHAT_IDS`, and in private chats
-with admins. Others get a "not allowed" reply in private chats and are ignored in groups.
+Access: read-only commands work in the chats with a live message, in `ALERT_CHAT_ID` and in
+`ALLOWED_CHAT_IDS`. Admins can use all commands in any chat. Others get a "not allowed" reply in
+private chats and are ignored in groups.
 
 ## Live status (pinned message)
 
@@ -562,7 +569,8 @@ Self-sufficiency is `1 − from grid / consumption`, limited to 0..100%.
   has ended (and was fetched after the day following its end) is final and never fetched again,
   the current month is refetched when older than an hour.
 - Automatic report: on the 1st of each month at `MONTHLY_REPORT_TIME` (default `09:00`) the
-  previous month is posted to `ALERT_CHAT_ID`. The posted month is stored, so a restart never
+  previous month is posted to the chats with a live message (`ALERT_CHAT_ID` is the fallback).
+  The posted month is stored, so a restart never
   posts it twice; if the bot was down at that time, it posts after the next start on the same
   day. A failed attempt is retried every 30 minutes that day. Set `MONTHLY_REPORT_TIME=` (empty)
   to disable it.
@@ -599,7 +607,8 @@ No extra Solarman calls are made: only the current snapshot and the stored sampl
 
 The bot can also watch your other building equipment (internet, cameras, lift and so on) that
 you already monitor with [healthchecks.io](https://healthchecks.io). It polls the Healthchecks
-Management API for the checks you list and posts status changes to the alert chat. (This is
+Management API for the checks you list and posts status changes to the chats with a live
+message. (This is
 unrelated to the inverter, and the bot does not ping healthchecks.io itself.)
 
 **1. Create a read-only API key.** In healthchecks.io open your project: Project Settings ->

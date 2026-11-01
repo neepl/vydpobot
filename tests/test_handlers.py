@@ -130,7 +130,7 @@ CHATS = {
     "alert_group_user": (ALERT_CHAT, "supergroup", USER),
     "admin_private": (ADMIN, "private", ADMIN),
     "user_private": (USER, "private", USER),
-    "unknown_group": (UNKNOWN_CHAT, "group", ADMIN),
+    "unknown_group": (UNKNOWN_CHAT, "group", USER),  # admins may use the bot anywhere
 }
 
 

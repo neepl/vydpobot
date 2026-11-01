@@ -35,11 +35,12 @@ class Settings(BaseSettings):
 
     # --- Telegram ---
     telegram_token: SecretStr
-    # Chat (user, group or channel) where alerts are posted.
-    alert_chat_id: int
+    # Optional fallback chat for automatic messages (alerts, equipment, monthly report). They go to
+    # every chat with a live message (/live); this chat is used only when there is none. 0 = unset.
+    alert_chat_id: int = 0
     # Users allowed to run admin commands (/threshold). Comma-separated in env.
     admin_user_ids: IntList = Field(default_factory=list)
-    # Chats allowed to use read-only commands. Empty = alert_chat_id + admins only.
+    # Chats allowed to use read-only commands (besides ALERT_CHAT_ID and admins' private chats).
     allowed_chat_ids: IntList = Field(default_factory=list)
 
     # --- Solarman backend ---

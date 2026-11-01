@@ -755,11 +755,18 @@ async def test_live_message_and_pin_are_silent(env):
 
 
 @pytest.mark.parametrize(
-    "chat_id, reachable, ok", [(0, True, False), (CHAT, False, False), (CHAT, True, True)]
+    "chat_id, live_chat, reachable, ok, error",
+    [
+        (0, True, True, True, False),  # unset, but a live chat exists: fine
+        (0, False, True, False, False),  # nowhere to deliver: warning only
+        (CHAT, True, False, False, True),  # set but unreachable: error + admins told
+        (CHAT, True, True, True, False),
+    ],
 )
-async def test_check_alert_chat(env, caplog, chat_id, reachable, ok):
+async def test_check_alert_chat(env, caplog, chat_id, live_chat, reachable, ok, error):
     env.bd["settings"].alert_chat_id = chat_id
-    seed(env, -200)
+    if live_chat:
+        seed(env, -200)
     sent = []
 
     class B:
@@ -770,10 +777,20 @@ async def test_check_alert_chat(env, caplog, chat_id, reachable, ok):
         async def send_message(self, chat_id, text, **kw):
             sent.append((chat_id, text))
 
-    with caplog.at_level("ERROR", logger=bot_mod.log.name):
+    with caplog.at_level("INFO", logger=bot_mod.log.name):
         assert await bot_mod.check_alert_chat(B(), env.bd["settings"], env.storage) is ok
-    if ok:
-        assert not sent and "ALERT_CHAT_ID" not in caplog.text
-    else:
-        assert "ALERT_CHAT_ID" in caplog.text and "-200" in caplog.text  # hint: the live chat
-        assert [c for c, _ in sent] == [ADMIN]
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert bool(errors) is error
+    assert [c for c, _ in sent] == ([ADMIN] if error else [])
+
+
+async def test_poll_alerts_go_to_the_live_chat(env, monkeypatch):
+    env.bd["settings"].alert_chat_id = 0
+    seed(env, -200)
+
+    async def fake_poll(bd, now):
+        return bot_mod.PollResult(alerts=["🪫 Battery dropped"], snapshot=snap())
+
+    monkeypatch.setattr(bot_mod, "poll_once", fake_poll)
+    await bot_mod.poll_job(ctx(env))
+    assert (-200, "🪫 Battery dropped") in env.bot.sent

@@ -112,7 +112,11 @@ def test_access() -> None:
     assert is_allowed(-200, "group", None, cfg)  # type: ignore[arg-type]
     assert is_allowed(7, "private", 7, cfg)  # type: ignore[arg-type]
     assert not is_allowed(8, "private", 8, cfg)  # type: ignore[arg-type]
-    assert not is_allowed(-300, "group", 7, cfg)  # type: ignore[arg-type]
+    assert is_allowed(-300, "group", 7, cfg)  # type: ignore[arg-type]  # admin anywhere
+    assert not is_allowed(-300, "group", 8, cfg)  # type: ignore[arg-type]
+    assert is_allowed(-400, "group", 8, cfg, [-400])  # type: ignore[arg-type]  # live chat
+    unset = SimpleNamespace(alert_chat_id=0, allowed_chat_ids=[], admin_user_ids=[])
+    assert not is_allowed(0, "group", 8, unset)  # type: ignore[arg-type]  # 0 is not a chat
     assert is_admin(7, cfg) and not is_admin(8, cfg) and not is_admin(None, cfg)  # type: ignore[arg-type]
 
 
@@ -388,11 +392,38 @@ async def test_quota_notice_goes_to_admins_once_per_day(bd) -> None:
     assert (await poll_once(bd, at(10))).admin_notices == []
 
 
-def test_admin_targets() -> None:
-    both = SimpleNamespace(admin_user_ids=[5, 6], alert_chat_id=-1)
-    none = SimpleNamespace(admin_user_ids=[], alert_chat_id=-1)
-    assert bot_mod.admin_targets(both) == [5, 6]  # type: ignore[arg-type]
-    assert bot_mod.admin_targets(none) == [-1]  # type: ignore[arg-type]
+def test_delivery_chats_and_admin_targets(tmp_path) -> None:
+    from vydpobot.storage import KEY_LIVE_MESSAGES
+
+    storage = Storage(tmp_path / "d.sqlite3")
+    settings = SimpleNamespace(admin_user_ids=[], alert_chat_id=-1)
+    bd = {"storage": storage, "settings": settings}
+    assert bot_mod.delivery_chats(bd) == [-1]  # no live message: the fallback chat
+    settings.alert_chat_id = 0
+    assert bot_mod.delivery_chats(bd) == []  # nothing configured
+    storage.set_json(KEY_LIVE_MESSAGES, {"-200": {"message_id": 1, "created_at": "x"}})
+    assert bot_mod.delivery_chats(bd) == [-200]  # the live chat wins
+    settings.alert_chat_id = -1
+    assert bot_mod.delivery_chats(bd) == [-200]  # ... also over a set ALERT_CHAT_ID
+    assert bot_mod.admin_targets(bd) == [-200]  # no admins: the delivery chats
+    settings.admin_user_ids = [5, 6]
+    assert bot_mod.admin_targets(bd) == [5, 6]
+    storage.close()
+
+
+async def test_broadcast_continues_after_a_failing_chat() -> None:
+    from telegram.error import BadRequest
+
+    sent = []
+
+    class B:
+        async def send_message(self, chat_id, text, **kw):
+            if chat_id == 1:
+                raise BadRequest("Chat not found")
+            sent.append((chat_id, text))
+
+    await bot_mod.broadcast(B(), [1, 2], ["a", "b"])
+    assert sent == [(2, "a"), (2, "b")]
 
 
 # ------------------------------------------------------------------ /token
