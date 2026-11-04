@@ -27,6 +27,8 @@ KEY_PORTAL_ACCESS = "portal_access"  # {"access", "expires_at"} shared between p
 KEY_PORTAL_BOOTSTRAP_SHA = "portal_bootstrap_sha"  # sha256 of the last-seen env bootstrap token
 KEY_PORTAL_AUTH_NOTIFIED = "portal_auth_notified"  # admins already told the token was rejected
 KEY_OUTAGE_SINCE = "outage_since"  # ISO start of the current grid outage, None when online
+KEY_PENDING_ALERTS = "pending_alerts"  # [{"text", "at"}] alerts not yet delivered anywhere
+KEY_UNDELIVERABLE_NOTIFIED = "undeliverable_notified"  # admins told that alerts are stuck
 KEY_LIVE_RENEWED = "live_renewed"  # "YYYY-MM" of the last monthly live-message renewal
 
 _SCHEMA = """

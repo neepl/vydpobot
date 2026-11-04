@@ -80,8 +80,10 @@ from vydpobot.storage import (
     KEY_LIVE_RENEWED,
     KEY_MONTH_REPORTED,
     KEY_OUTAGE_SINCE,
+    KEY_PENDING_ALERTS,
     KEY_PORTAL_AUTH_NOTIFIED,
     KEY_THRESHOLD,
+    KEY_UNDELIVERABLE_NOTIFIED,
     Storage,
 )
 
@@ -1542,14 +1544,50 @@ def delivery_chats(bd: dict[str, Any]) -> list[int]:
     return live or ([alert] if alert else [])
 
 
-async def broadcast(bot: Any, chats: list[int], messages: list[str]) -> None:
-    """Send each HTML message to each chat; a failing chat does not stop the others."""
+async def broadcast(bot: Any, chats: list[int], messages: list[str]) -> set[str]:
+    """Send each HTML message to each chat; a failing chat does not stop the others.
+    Returns the messages that reached at least one chat."""
+    delivered: set[str] = set()
     for chat_id in chats:
         for msg in messages:
             try:
                 await bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.HTML)
+                delivered.add(msg)
             except TelegramError as e:
                 log.warning("Cannot send to chat %s: %s", chat_id, e)
+    return delivered
+
+
+PENDING_ALERT_MAX_AGE = timedelta(hours=12)  # an older alert is no longer useful
+
+
+async def deliver_alerts(bot: Any, bd: dict[str, Any], new: list[str], now: datetime) -> None:
+    """Send alerts to the delivery chats. An alert that reaches no chat stays pending and is
+    retried at the next call (for up to 12 h), so an alert is never lost silently. When alerts
+    are stuck, the admins are told privately once (until something is delivered again)."""
+    storage: Storage = bd["storage"]
+    pending = [
+        p
+        for p in storage.get_json(KEY_PENDING_ALERTS) or []
+        if now - datetime.fromisoformat(p["at"]) <= PENDING_ALERT_MAX_AGE
+    ]
+    queue = pending + [{"text": m, "at": now.isoformat()} for m in new]
+    if not queue:
+        return
+    chats = delivery_chats(bd)
+    delivered = await broadcast(bot, chats, [q["text"] for q in queue]) if chats else set()
+    remaining = [q for q in queue if q["text"] not in delivered]
+    storage.set_json(KEY_PENDING_ALERTS, remaining)
+    if delivered:
+        storage.set_json(KEY_UNDELIVERABLE_NOTIFIED, False)
+    if not remaining or storage.get_json(KEY_UNDELIVERABLE_NOTIFIED):
+        return
+    log.error("%d alert(s) could not be delivered (chats: %s)", len(remaining), chats or "none")
+    admins = list(bd["settings"].admin_user_ids)
+    if admins:
+        text = html.escape(t(get_lang(bd), "alert.undeliverable", n=len(remaining)))
+        if await broadcast(bot, admins, [text]):
+            storage.set_json(KEY_UNDELIVERABLE_NOTIFIED, True)
 
 
 def admin_targets(bd: dict[str, Any]) -> list[int]:
@@ -1561,9 +1599,9 @@ async def poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     bd = context.application.bot_data
     result = PollResult()
     try:
-        result = await poll_once(bd, datetime.now(UTC))
-        if result.alerts:
-            await broadcast(context.bot, delivery_chats(bd), result.alerts)
+        now = datetime.now(UTC)
+        result = await poll_once(bd, now)
+        await deliver_alerts(context.bot, bd, result.alerts, now)
         if result.admin_notices:
             await broadcast(context.bot, admin_targets(bd), result.admin_notices)
     except Exception:
@@ -1588,9 +1626,9 @@ async def balance_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def equipment_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     bd = context.application.bot_data
     try:
-        result = await equipment_once(bd, datetime.now(UTC))
-        if result.alerts:
-            await broadcast(context.bot, delivery_chats(bd), result.alerts)
+        now = datetime.now(UTC)
+        result = await equipment_once(bd, now)
+        await deliver_alerts(context.bot, bd, result.alerts, now)
         if result.admin_notices:
             await broadcast(context.bot, admin_targets(bd), result.admin_notices)
         if result.refresh:

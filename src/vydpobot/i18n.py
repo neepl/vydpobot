@@ -53,6 +53,10 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         ),
         "alert.recovered": "Battery recovered to {soc}%.",
         "alert.stale": "No new data from the inverter, last update {ago}.",
+        "alert.undeliverable": (
+            "⚠️ Alerts cannot be delivered: no chat is reachable. Send /live in the group "
+            "(or set ALERT_CHAT_ID). Waiting: {n}."
+        ),
         "alert.back_online": "Data from the inverter is flowing again.",
         "chart.title": "Last {hours} h",
         "chart.power_axis": "Power, kW",
@@ -214,6 +218,10 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         ),
         "alert.recovered": "Заряд батареї відновився до {soc}%.",
         "alert.stale": "Немає нових даних від інвертора, останнє оновлення {ago}.",
+        "alert.undeliverable": (
+            "⚠️ Сповіщення не вдається доставити: немає доступного чату. Надішліть /live у "
+            "групі (або задайте ALERT_CHAT_ID). Очікують: {n}."
+        ),
         "alert.back_online": "Дані від інвертора знову надходять.",
         "chart.title": "Останні {hours} год",
         "chart.power_axis": "Потужність, кВт",

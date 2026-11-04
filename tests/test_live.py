@@ -794,3 +794,63 @@ async def test_poll_alerts_go_to_the_live_chat(env, monkeypatch):
     monkeypatch.setattr(bot_mod, "poll_once", fake_poll)
     await bot_mod.poll_job(ctx(env))
     assert (-200, "🪫 Battery dropped") in env.bot.sent
+
+
+# ------------------------------------------------------------------ alerts are never lost silently
+
+
+class FlakyBot:
+    """send_message fails for chats in `down`."""
+
+    def __init__(self, down=()):
+        self.down, self.sent = set(down), []
+
+    async def send_message(self, chat_id, text, **kw):
+        if chat_id in self.down:
+            raise BadRequest("Chat not found")
+        self.sent.append((chat_id, text))
+
+
+async def test_undeliverable_alert_stays_pending_and_admins_are_told_once(env):
+    from vydpobot.storage import KEY_PENDING_ALERTS
+
+    env.bd["settings"].alert_chat_id = 0  # last night's situation: nowhere to deliver
+    bot = FlakyBot()
+    now = datetime.now(UTC)
+    await bot_mod.deliver_alerts(bot, env.bd, ["🪫 50%"], now)
+    await bot_mod.deliver_alerts(bot, env.bd, ["🪫 45%"], now + timedelta(minutes=5))
+    pending = [p["text"] for p in env.storage.get_json(KEY_PENDING_ALERTS)]
+    assert pending == ["🪫 50%", "🪫 45%"]  # nothing marked as sent
+    admin_msgs = [m for c, m in bot.sent if c == ADMIN]
+    assert len(admin_msgs) == 1 and "/live" in admin_msgs[0]  # told once, not every poll
+    # an admin sends /live: the next poll delivers everything that was waiting
+    seed(env, -200)
+    await bot_mod.deliver_alerts(bot, env.bd, ["🪫 40%"], now + timedelta(minutes=10))
+    assert [m for c, m in bot.sent if c == -200] == ["🪫 50%", "🪫 45%", "🪫 40%"]
+    assert env.storage.get_json(KEY_PENDING_ALERTS) == []
+
+
+async def test_failed_send_is_retried(env):
+    from vydpobot.storage import KEY_PENDING_ALERTS
+
+    seed(env, -200)
+    bot = FlakyBot(down={-200})
+    now = datetime.now(UTC)
+    await bot_mod.deliver_alerts(bot, env.bd, ["🪫 20%"], now)
+    assert [p["text"] for p in env.storage.get_json(KEY_PENDING_ALERTS)] == ["🪫 20%"]
+    bot.down.clear()  # Telegram reachable again
+    await bot_mod.deliver_alerts(bot, env.bd, [], now + timedelta(minutes=5))
+    assert (-200, "🪫 20%") in bot.sent and env.storage.get_json(KEY_PENDING_ALERTS) == []
+
+
+async def test_pending_alerts_expire_after_12_hours(env):
+    from vydpobot.storage import KEY_PENDING_ALERTS
+
+    env.bd["settings"].alert_chat_id = 0
+    bot = FlakyBot()
+    now = datetime.now(UTC)
+    await bot_mod.deliver_alerts(bot, env.bd, ["old"], now)
+    seed(env, -200)
+    await bot_mod.deliver_alerts(bot, env.bd, ["new"], now + timedelta(hours=13))
+    assert [m for c, m in bot.sent if c == -200] == ["new"]  # the stale alert is dropped
+    assert env.storage.get_json(KEY_PENDING_ALERTS) == []
