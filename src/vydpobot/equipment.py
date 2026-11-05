@@ -142,6 +142,7 @@ class EquipEvent:
     name: str
     last_ping: datetime | None = None
     duration: timedelta | None = None
+    key: str = ""  # check key (unique_key / uuid / slug): groups its alerts
 
 
 def diff(
@@ -158,12 +159,14 @@ def diff(
         alerted = bool(old.get("alerted"))
         down_since: str | None = old.get("down_since") if alerted else None
         if c.status == "down" and not alerted:
-            events.append(EquipEvent("down", c.name, last_ping=c.last_ping))
+            events.append(EquipEvent("down", c.name, last_ping=c.last_ping, key=c.key))
             alerted, down_since = True, now.isoformat()
         elif c.status == "up" and alerted:
             since = _parse_ts(down_since)
             events.append(
-                EquipEvent("recovered", c.name, duration=(now - since) if since else None)
+                EquipEvent(
+                    "recovered", c.name, duration=(now - since) if since else None, key=c.key
+                )
             )
             alerted, down_since = False, None
         new_state[c.key] = {"status": c.status, "down_since": down_since, "alerted": alerted}

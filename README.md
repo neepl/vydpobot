@@ -23,7 +23,8 @@ SUN-xK-SG04LP3) through the Solarman Cloud OpenAPI. It runs in Docker on a small
   chat (Telegram allows this for messages younger than 48 hours). There is no separate
   "recovered" message. Oscillation around a level does not spam.
 - Stale-data and outage detection: warns when the logger stops reporting, or when polling fails
-  three times in a row, and tells you when it is back.
+  three times in a row. When data flows again, the bot deletes the warning instead of posting
+  another message.
 - `/graph [hours]`: chart of PV, load, battery, grid and SOC (1..48 h, default 24) with an
   energy summary.
 - `/month [YYYY-MM]`: one bar per day for consumption (own energy and grid parts) and monthly totals with
@@ -150,7 +151,7 @@ once at INFO, so the wording used during an outage can be learned.
   warning. If you see it, stop the bot, check `SOLARMAN_EMAIL`, `SOLARMAN_PASSWORD` and the
   appId/secret (log in to the web portal to verify), then restart.
 - If the logger loses Wi-Fi, the cloud data freezes. The bot then posts a "no fresh data" alert
-  after `STALE_AFTER_MIN` minutes and a "back online" message when uploads resume.
+  after `STALE_AFTER_MIN` minutes and deletes it when uploads resume.
 
 ## Temporary: web-portal backend (unofficial)
 
@@ -312,6 +313,12 @@ You do not need the group ID.
 From then on, every automatic message goes to the chats with a live message: battery alerts,
 "no fresh data" warnings, equipment alerts and the monthly report. Commands work in those chats
 for everyone. Admins can use commands in any chat.
+
+Problem alerts clean up after themselves, so the chat holds only current problems. Once the
+problem is gone, the bot deletes its alerts and posts no "all good" message. This applies to
+low-battery alerts (battery recharged), "no fresh data" warnings (data flows again) and
+equipment alerts (the check is up again). Telegram lets bots delete only messages younger than
+48 hours, so an older alert stays in the chat.
 
 - `ALERT_CHAT_ID` is optional. The bot uses it only when no chat has a live message. At startup the
   bot logs where automatic messages go, and it logs an error if `ALERT_CHAT_ID` is set but
@@ -634,7 +641,7 @@ HEALTHCHECKS_CHECKS=internet, cameras, lift
 
 **Alert semantics.**
 - A check going `down` gives one alert: `🔴 Lift is down (last signal 12:35)`. When it is `up`
-  again: `🟢 Lift is back up (was down 2 hours)`.
+  again, the bot deletes that alert and posts no message.
 - Grace, started, paused and new states never alert. down -> grace -> up still counts as one
   recovery.
 - State is stored in the database, so a restart does not repeat an alert for a check that is

@@ -44,7 +44,6 @@ from vydpobot.i18n import (
     SUPPORTED,
     Lang,
     fmt_ago,
-    fmt_duration,
     fmt_hm,
     fmt_num,
     fmt_power,
@@ -84,6 +83,7 @@ from vydpobot.storage import (
     KEY_PENDING_ALERTS,
     KEY_PORTAL_AUTH_NOTIFIED,
     KEY_THRESHOLD,
+    KEY_TRACKED_ALERTS,
     KEY_UNDELIVERABLE_NOTIFIED,
     Storage,
 )
@@ -433,7 +433,8 @@ def equipment_line(result: FetchResult, lang: Lang, budget: int) -> str | None:
 
 
 def format_event(event: AlertEvent, lang: Lang, snapshot: Snapshot | None = None) -> str:
-    """HTML text for one alert event."""
+    """HTML text for a drop or stale event (recovery and back-online send no message: they
+    delete the alerts instead)."""
     match event.kind:
         case "drop":
             load = snapshot.load_w if snapshot else None
@@ -442,21 +443,16 @@ def format_event(event: AlertEvent, lang: Lang, snapshot: Snapshot | None = None
             level = event.level if event.level is not None else 0.0
             text = t(lang, "alert.drop", soc=_num(soc), level=_num(level), power=pw)
             return f"🪫 {html.escape(text)}"
-        case "stale":
+        case _:
             text = t(lang, "alert.stale", ago=fmt_ago(lang, event.stale_seconds or 0.0))
             return f"⚠️ {html.escape(text)}"
-        case _:
-            return f"🟢 {html.escape(t(lang, 'alert.back_online'))}"
 
 
 def format_equipment_event(event: EquipEvent, lang: Lang, tz: ZoneInfo, now: datetime) -> str:
-    """HTML text for one equipment event (check names are escaped)."""
-    name = event.name
-    if event.kind == "down":
-        when = _local(event.last_ping, tz, now) if event.last_ping else DASH
-        return f"🔴 {html.escape(t(lang, 'equip.down', name=name, time=when))}"
-    dur = fmt_duration(lang, event.duration.total_seconds()) if event.duration else DASH
-    return f"🟢 {html.escape(t(lang, 'equip.recovered', name=name, duration=dur))}"
+    """HTML text for a down event (check names are escaped). Recovery sends no message: the
+    down alert is deleted instead."""
+    when = _local(event.last_ping, tz, now) if event.last_ping else DASH
+    return f"🔴 {html.escape(t(lang, 'equip.down', name=event.name, time=when))}"
 
 
 def _utcnow() -> datetime:
@@ -742,6 +738,8 @@ class PollResult:
     alerts: list[str] = field(default_factory=list)  # -> delivery chats
     low_battery: list[str] = field(default_factory=list)  # -> delivery chats, deleted on recovery
     battery_restored: bool = False  # SOC back above threshold + hysteresis: clean up low_battery
+    stale: list[str] = field(default_factory=list)  # "no fresh data" -> deleted when data is back
+    back_online: bool = False  # fresh data again: clean up stale (no message)
     admin_notices: list[str] = field(default_factory=list)  # -> admins' private chats
     snapshot: Snapshot | None = None  # fetched this cycle (None on failure)
 
@@ -801,7 +799,7 @@ async def _poll_once(bot_data: dict[str, Any], now: datetime) -> PollResult:
         _save_state(storage, state)
         last = storage.latest_sample()
         ago = (now - last.ts).total_seconds() if last else fails * settings.poll_interval_s
-        result.alerts = [format_event(AlertEvent("stale", stale_seconds=ago), lang)]
+        result.stale = [format_event(AlertEvent("stale", stale_seconds=ago), lang)]
         return result
 
     result.snapshot = snap
@@ -829,10 +827,16 @@ async def _poll_once(bot_data: dict[str, Any], now: datetime) -> PollResult:
         return result
     result.low_battery = [format_event(e, lang, snap) for e in events if e.kind == "drop"]
     result.battery_restored = any(e.kind == "recovered" for e in events)  # no message, cleanup
-    result.alerts = [
-        format_event(e, lang, snap) for e in events if e.kind not in ("drop", "recovered")
-    ]
+    result.stale = [format_event(e, lang, snap) for e in events if e.kind == "stale"]
+    result.back_online = any(e.kind == "back_online" for e in events)  # no message, cleanup
+    quiet = ("drop", "recovered", "stale", "back_online")
+    result.alerts = [format_event(e, lang, snap) for e in events if e.kind not in quiet]
     return result
+
+
+def equip_group(key: str) -> str:
+    """Tracked-alert group of one healthchecks check."""
+    return f"equip:{key}"
 
 
 def equipment_config_warning(settings: Settings) -> str | None:
@@ -849,7 +853,9 @@ def equipment_config_warning(settings: Settings) -> str | None:
 
 @dataclass
 class EquipmentResult:
-    alerts: list[str] = field(default_factory=list)  # -> alert chat
+    alerts: list[str] = field(default_factory=list)  # -> delivery chats
+    tracked: list[tuple[str, str]] = field(default_factory=list)  # (group, 🔴 text) per down check
+    cleared: list[str] = field(default_factory=list)  # groups of recovered checks: delete, no 🟢
     admin_notices: list[str] = field(default_factory=list)  # -> admins' private chats
     changed: bool = False  # events were produced
     refresh: bool = False  # the live message should be refreshed (events or new picture)
@@ -897,7 +903,12 @@ async def equipment_once(bd: dict[str, Any], now: datetime) -> EquipmentResult:
     except Exception:
         log.exception("Equipment evaluation failed")
         return out
-    out.alerts = [format_equipment_event(e, lang, settings.tz, now) for e in events]
+    out.tracked = [
+        (equip_group(e.key), format_equipment_event(e, lang, settings.tz, now))
+        for e in events
+        if e.kind == "down"
+    ]
+    out.cleared = [equip_group(e.key) for e in events if e.kind == "recovered"]
     out.changed = bool(events)
     out.refresh = out.refresh or out.changed
     return out
@@ -1574,35 +1585,35 @@ async def deliver_alerts(
     now: datetime,
     *,
     low_battery: list[str] | tuple[str, ...] = (),
+    tracked: list[tuple[str, str]] | tuple[tuple[str, str], ...] = (),
 ) -> None:
     """Send alerts to the delivery chats. An alert that reaches no chat stays pending and is
     retried at the next call (for up to 12 h), so an alert is never lost silently. When alerts
     are stuck, the admins are told privately once (until something is delivered again).
-    Low-battery alerts are remembered (chat, message id) so they can be deleted on recovery."""
+
+    Tracked alerts, given as (group, text), are remembered with their message ids so that
+    `clear_alerts(group)` can delete them once the problem is gone: "low_battery", "stale", and
+    "equip:<check>"."""
     storage: Storage = bd["storage"]
     pending = [
         p
         for p in storage.get_json(KEY_PENDING_ALERTS) or []
         if now - datetime.fromisoformat(p["at"]) <= PENDING_ALERT_MAX_AGE
     ]
-    queue = pending + [
-        {"text": m, "at": now.isoformat(), "kind": "low_battery"} for m in low_battery
-    ]
+    groups = [*(("low_battery", m) for m in low_battery), *tracked]
+    queue = pending + [{"text": m, "at": now.isoformat(), "kind": g} for g, m in groups]
     queue += [{"text": m, "at": now.isoformat()} for m in new]
     if not queue:
         return
     chats = delivery_chats(bd)
     delivered = await broadcast(bot, chats, [q["text"] for q in queue]) if chats else {}
-    sent_low = [
-        {"chat": c, "message_id": mid}
-        for q in queue
-        if q.get("kind") == "low_battery"
-        for c, mid in delivered.get(q["text"], [])
-        if mid is not None
-    ]
-    if sent_low:
-        tracked = storage.get_json(KEY_LOW_BATTERY_MSGS) or []
-        storage.set_json(KEY_LOW_BATTERY_MSGS, tracked + sent_low)
+    remembered = _tracked_map(storage)
+    for q in queue:
+        if q.get("kind"):
+            for c, mid in delivered.get(q["text"], []):
+                if mid is not None:
+                    remembered.setdefault(q["kind"], []).append({"chat": c, "message_id": mid})
+    storage.set_json(KEY_TRACKED_ALERTS, remembered)
     remaining = [q for q in queue if q["text"] not in delivered]
     storage.set_json(KEY_PENDING_ALERTS, remaining)
     if delivered:
@@ -1617,18 +1628,33 @@ async def deliver_alerts(
             storage.set_json(KEY_UNDELIVERABLE_NOTIFIED, True)
 
 
-async def clear_low_battery(bot: Any, bd: dict[str, Any]) -> None:
-    """Battery restored: delete the low-battery alerts sent during the discharge and drop any
-    still pending. Telegram only deletes messages younger than 48 h; older ones stay."""
+def _tracked_map(storage: Storage) -> dict[str, list[dict[str, int]]]:
+    """{group: [{"chat", "message_id"}]}; the pre-groups low-battery list is migrated in."""
+    tracked = storage.get_json(KEY_TRACKED_ALERTS) or {}
+    if legacy := storage.get_json(KEY_LOW_BATTERY_MSGS):
+        tracked.setdefault("low_battery", []).extend(legacy)
+        storage.set_json(KEY_LOW_BATTERY_MSGS, [])
+    return tracked
+
+
+async def clear_alerts(bot: Any, bd: dict[str, Any], group: str) -> None:
+    """The problem is gone: delete the alerts of `group` from the chats (no "resolved" message)
+    and drop any still pending. Telegram only deletes messages younger than 48 h."""
     storage: Storage = bd["storage"]
-    for m in storage.get_json(KEY_LOW_BATTERY_MSGS) or []:
+    tracked = _tracked_map(storage)
+    for m in tracked.pop(group, []):
         try:
             await bot.delete_message(chat_id=m["chat"], message_id=m["message_id"])
         except TelegramError as e:
-            log.info("Cannot delete low-battery alert in chat %s: %s", m["chat"], e)
-    storage.set_json(KEY_LOW_BATTERY_MSGS, [])
+            log.info("Cannot delete %s alert in chat %s: %s", group, m["chat"], e)
+    storage.set_json(KEY_TRACKED_ALERTS, tracked)
     pending = storage.get_json(KEY_PENDING_ALERTS) or []
-    storage.set_json(KEY_PENDING_ALERTS, [p for p in pending if p.get("kind") != "low_battery"])
+    storage.set_json(KEY_PENDING_ALERTS, [p for p in pending if p.get("kind") != group])
+
+
+async def clear_low_battery(bot: Any, bd: dict[str, Any]) -> None:
+    """Battery restored: delete the low-battery alerts of this discharge."""
+    await clear_alerts(bot, bd, "low_battery")
 
 
 def admin_targets(bd: dict[str, Any]) -> list[int]:
@@ -1644,7 +1670,16 @@ async def poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         result = await poll_once(bd, now)
         if result.battery_restored:
             await clear_low_battery(context.bot, bd)
-        await deliver_alerts(context.bot, bd, result.alerts, now, low_battery=result.low_battery)
+        if result.back_online:
+            await clear_alerts(context.bot, bd, "stale")
+        await deliver_alerts(
+            context.bot,
+            bd,
+            result.alerts,
+            now,
+            low_battery=result.low_battery,
+            tracked=[("stale", m) for m in result.stale],
+        )
         if result.admin_notices:
             await broadcast(context.bot, admin_targets(bd), result.admin_notices)
     except Exception:
@@ -1671,7 +1706,9 @@ async def equipment_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         now = datetime.now(UTC)
         result = await equipment_once(bd, now)
-        await deliver_alerts(context.bot, bd, result.alerts, now)
+        for group in result.cleared:
+            await clear_alerts(context.bot, bd, group)
+        await deliver_alerts(context.bot, bd, result.alerts, now, tracked=result.tracked)
         if result.admin_notices:
             await broadcast(context.bot, admin_targets(bd), result.admin_notices)
         if result.refresh:

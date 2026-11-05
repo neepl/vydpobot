@@ -9,7 +9,7 @@ REQUIRED = [
     "status.title", "status.updated", "status.pv", "status.load", "status.grid_import",
     "status.grid_export", "status.grid_idle", "status.battery", "status.bat_charging",
     "status.bat_discharging", "status.bat_unknown", "status.na",
-    "status.stale_warning", "alert.drop", "alert.stale", "alert.back_online",
+    "status.stale_warning", "alert.drop", "alert.stale",
     "chart.title", "chart.power_axis", "chart.soc_axis", "chart.pv", "chart.load",
     "chart.battery", "chart.grid", "chart.threshold", "chart.no_data", "chart.summary",
     "bot.help", "bot.not_allowed", "bot.admin_only", "bot.threshold.current",

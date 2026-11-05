@@ -204,14 +204,14 @@ async def _run(
         ok = poll.snapshot is not None
         if not ok:
             poll_errors = cap.messages or ["Solarman poll failed"]
-        alerts += poll.low_battery + poll.alerts
+        alerts += poll.low_battery + poll.stale + poll.alerts
         notices += poll.admin_notices
 
         equip_error = None
         if monitor is not None:
             with _capture() as cap:
                 eq = await bot.equipment_once(bd, now)
-            alerts += eq.alerts
+            alerts += [text for _, text in eq.tracked] + eq.alerts
             notices += eq.admin_notices
             if bd.get("equipment_fail_count"):
                 equip_error = "; ".join(cap.messages) or "healthchecks.io poll failed"

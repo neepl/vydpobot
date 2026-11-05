@@ -152,7 +152,7 @@ coordinate by keeping keys namespaced):
   ({soc}), `status.bat_charging` ({power}), `status.bat_discharging` ({power}),
   `status.bat_unknown`, `status.na`, `status.stale_warning` ({ago})
 - alerts: `alert.drop` ({soc}, {level}, {power}),
-  `alert.stale` ({ago}), `alert.back_online`
+  `alert.stale` ({ago})
 - chart: `chart.title` ({hours}), `chart.power_axis` (kW), `chart.soc_axis`, `chart.pv`,
   `chart.load`, `chart.battery`, `chart.grid`, `chart.threshold`, `chart.no_data`,
   `chart.summary` ({pv_kwh}, {load_kwh}, {import_kwh}, {export_kwh}, {charge_kwh}, {discharge_kwh})
@@ -199,8 +199,8 @@ def evaluate_staleness(state, data_ts: datetime, now: datetime, stale_after_min:
 3. **Full recovery**: if soc >= threshold + hysteresis: if in_alert emit `recovered(soc)`;
    reset to `AlertState(stale_notified=state.stale_notified)`. The bot sends no message for
    `recovered`: `PollResult.battery_restored` makes `poll_job` call `clear_low_battery`, which
-   deletes the tracked low-battery messages (`KEY_LOW_BATTERY_MSGS`, filled by `deliver_alerts`
-   from the `low_battery` list) and drops pending low-battery alerts. Default step: 10%.
+   deletes the tracked messages of the `low_battery` group (see "Tracked alerts") and drops its
+   pending alerts. Default step: 10%.
 4. **Partial re-arm** (soc rose but not fully recovered): `cand` = largest level <= soc - hysteresis;
    `next_level = min(threshold, max(A, cand))`. Example thr 50/step 5/hyst 5: alerted 30
    (A=25), charges to 45 -> cand 40 -> A=40 -> later drop to 40 alerts again. Oscillation
@@ -210,6 +210,19 @@ Changing threshold at runtime: bot resets state to `AlertState()` keeping stale_
 `evaluate_staleness`: disabled if stale_after_min == 0. If `now - data_ts > stale_after_min`
 and not stale_notified -> emit `stale(stale_seconds)`, set flag. If fresh again and flag set ->
 emit `back_online`, clear flag.
+
+**Tracked alerts.** Problem alerts are deleted when the problem is gone, and no "resolved"
+message is sent. `deliver_alerts(..., low_battery=[text], tracked=[(group, text)])` queues them
+with `kind=group` and remembers each delivered message in `KEY_TRACKED_ALERTS` =
+`{group: [{"chat", "message_id"}]}`. The legacy `KEY_LOW_BATTERY_MSGS` list is migrated into
+`low_battery`. `clear_alerts(bot, bd, group)` deletes those messages (Telegram: only messages
+younger than 48 h; failures are logged and skipped) and drops pending entries of the group.
+The groups are:
+- `low_battery`: `PollResult.low_battery`, cleared on `battery_restored`.
+- `stale`: `PollResult.stale` (stale event, or the 3-failure note), cleared on
+  `PollResult.back_online`.
+- `equip:<check key>`: `EquipmentResult.tracked` (down events), cleared for each group in
+  `EquipmentResult.cleared` (recovered events).
 
 Thorough parametrized tests including the examples above, skipped levels, soc 0, hysteresis 0,
 round-trip to_dict/from_dict.
@@ -294,7 +307,8 @@ Jobs:
 - `poll` every `poll_interval_s` (first after 10 s): get_snapshot -> add_sample ->
   evaluate_soc (only if sample is new, i.e. logger reported fresh data) -> evaluate_staleness ->
   persist state -> send events to alert_chat_id. Exceptions logged, never crash the job;
-  after 3 consecutive poll failures send one `alert.stale`-like error note (reuse staleness flag).
+  after 3 consecutive poll failures send one `alert.stale`-like error note (reuse staleness flag;
+  tracked in the `stale` group).
 - `prune` daily: keep 14 days of samples.
 - `monthly_report` (`run_daily` at `monthly_report_time`) + `monthly_startup` (once, 20 s after
   start, respects the time of day) -> `monthly_rollover`. A report failure schedules a retry in
@@ -492,7 +506,9 @@ settings: `HEALTHCHECKS_POLL_S` (default 300, min 60), `HEALTHCHECKS_API_URL` (d
   order, unmatched entries are logged once per change (WARNING), never alerted.
 - `diff(prev_state, checks, now)` is pure. State per check (unique_key, else uuid/slug) is
   `{"status", "down_since", "alerted"}` in `KEY_EQUIPMENT_STATE`. Alerts on transitions only:
-  to `down` while not alerted -> `down`; to `up` while alerted -> `recovered` (with duration).
+  to `down` while not alerted -> `down`; to `up` while alerted -> `recovered`. Events carry the
+  check key; `down` is sent as a tracked alert in group `equip:<key>`, and `recovered` only
+  deletes it (no message).
   grace/started/paused/new never alert; state survives restarts.
 - 3 consecutive API failures send one admin notice (admins' private chats, else alert chat);
   cleared silently on the next success.

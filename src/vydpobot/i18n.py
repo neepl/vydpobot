@@ -56,7 +56,6 @@ MESSAGES: dict[Lang, dict[str, str]] = {
             "⚠️ Alerts cannot be delivered: no chat is reachable. Send /live in the group "
             "(or set ALERT_CHAT_ID). Waiting: {n}."
         ),
-        "alert.back_online": "Data from the inverter is flowing again.",
         "chart.title": "Last {hours} h",
         "chart.power_axis": "Power, kW",
         "chart.soc_axis": "Battery, %",
@@ -160,7 +159,6 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "time.ago.h.few": "{n} hours ago",
         "time.just_now": "just now",
         "equip.down": "{name} is down (last signal {time})",
-        "equip.recovered": "{name} is back up (was down {duration})",
         "equip.api_failed": "Cannot reach healthchecks.io ({reason})",
         "health.title": "Building equipment",
         "health.checked": "checked {time}",
@@ -221,7 +219,6 @@ MESSAGES: dict[Lang, dict[str, str]] = {
             "⚠️ Сповіщення не вдається доставити: немає доступного чату. Надішліть /live у "
             "групі (або задайте ALERT_CHAT_ID). Очікують: {n}."
         ),
-        "alert.back_online": "Дані від інвертора знову надходять.",
         "chart.title": "Останні {hours} год",
         "chart.power_axis": "Потужність, кВт",
         "chart.soc_axis": "Батарея, %",
@@ -328,7 +325,6 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "time.ago.h.few": "{n} години тому",
         "time.just_now": "щойно",
         "equip.down": "{name}: немає сигналу (останній {time})",
-        "equip.recovered": "{name} знову в нормі (не працювало {duration})",
         "equip.api_failed": "Не вдається отримати дані з healthchecks.io ({reason})",
         "health.title": "Обладнання будинку",
         "health.checked": "перевірено {time}",

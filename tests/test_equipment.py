@@ -220,10 +220,6 @@ def test_event_texts():
     assert bot_mod.format_equipment_event(down, "en", TZ, NOW) == (
         "🔴 A&lt;b&gt; is down (last signal 12:35)"
     )
-    rec = bot_mod.EquipEvent("recovered", "Ліфт", duration=timedelta(minutes=125))
-    assert bot_mod.format_equipment_event(rec, "uk", TZ, NOW) == (
-        "🟢 Ліфт знову в нормі (не працювало 2 години)"
-    )
 
 
 # ------------------------------------------------------------------ HTTP
@@ -308,9 +304,14 @@ async def test_key_never_logged_or_in_errors(caplog):
 class FakeBot:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
+        self.deleted: list[tuple[int, int]] = []
 
-    async def send_message(self, chat_id: int, text: str, **_: Any) -> None:
+    async def send_message(self, chat_id: int, text: str, **_: Any) -> SimpleNamespace:
         self.sent.append((chat_id, text))
+        return SimpleNamespace(message_id=100 + len(self.sent))
+
+    async def delete_message(self, chat_id: int, message_id: int) -> None:
+        self.deleted.append((chat_id, message_id))
 
 
 class FakeMonitor:
@@ -361,6 +362,29 @@ async def test_job_alerts_and_persists_and_caches(env):
     assert env.bd["equipment_cache"][0].checks[0].name == "Lift"
     await bot_mod.equipment_job(ctx)  # still down: no new alert
     assert len(env.bot.sent) == 1
+
+
+async def test_recovery_deletes_down_alert_without_green_message(env):
+    env.bd["equipment"] = FakeMonitor(
+        result(chk("Lift", "down", uk="k"), chk("Pump", "down", uk="p")),
+        result(chk("Lift", "up", uk="k"), chk("Pump", "down", uk="p")),
+    )
+    ctx = SimpleNamespace(application=SimpleNamespace(bot_data=env.bd), bot=env.bot)
+    await bot_mod.equipment_job(ctx)
+    assert [m.split(" ")[1] for _, m in env.bot.sent] == ["Lift", "Pump"]  # ids 101, 102
+    await bot_mod.equipment_job(ctx)
+    assert env.bot.deleted == [(CHAT, 101)]  # only Lift's alert; Pump is still down
+    assert len(env.bot.sent) == 2  # no 🟢 message
+
+
+async def test_equipment_once_tracks_down_and_clears_recovered(env):
+    env.bd["equipment"] = FakeMonitor(
+        result(chk("Lift", "down", uk="k")), result(chk("Lift", "up", uk="k"))
+    )
+    first = await bot_mod.equipment_once(env.bd, NOW)
+    assert [g for g, _ in first.tracked] == ["equip:k"] and not first.alerts
+    second = await bot_mod.equipment_once(env.bd, NOW + timedelta(minutes=5))
+    assert second.cleared == ["equip:k"] and not second.tracked and not second.alerts
 
 
 def job_env(env, monkeypatch, *results):

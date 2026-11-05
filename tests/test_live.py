@@ -876,19 +876,19 @@ class TrackingBot(FlakyBot):
 
 
 async def test_low_battery_alerts_deleted_when_battery_restored(env):
-    from vydpobot.storage import KEY_LOW_BATTERY_MSGS
+    from vydpobot.storage import KEY_TRACKED_ALERTS
 
     seed(env, -200)
     bot = TrackingBot()
     now = datetime.now(UTC)
     await bot_mod.deliver_alerts(bot, env.bd, [], now, low_battery=["🪫 40%"])
     await bot_mod.deliver_alerts(bot, env.bd, ["⚠️ stale"], now, low_battery=["🪫 30%"])
-    tracked = env.storage.get_json(KEY_LOW_BATTERY_MSGS)
+    tracked = env.storage.get_json(KEY_TRACKED_ALERTS)["low_battery"]
     assert [(m["chat"], m["message_id"]) for m in tracked] == [(-200, 701), (-200, 702)]
     bot.delete_fail = {702}  # one deletion fails: the cleanup carries on
     await bot_mod.clear_low_battery(bot, env.bd)
     assert bot.deleted == [(-200, 701)]
-    assert env.storage.get_json(KEY_LOW_BATTERY_MSGS) == []
+    assert "low_battery" not in env.storage.get_json(KEY_TRACKED_ALERTS)
     # the other alert ("stale") was never tracked, so it is never deleted
     assert all(mid != 703 for _, mid in bot.deleted)
 
@@ -902,6 +902,56 @@ async def test_restore_drops_pending_low_battery_alerts(env):
     await bot_mod.deliver_alerts(bot, env.bd, ["⚠️ stale"], now, low_battery=["🪫 40%"])
     await bot_mod.clear_low_battery(bot, env.bd)
     assert [p["text"] for p in env.storage.get_json(KEY_PENDING_ALERTS)] == ["⚠️ stale"]
+
+
+async def test_legacy_low_battery_list_is_migrated(env):
+    from vydpobot.storage import KEY_LOW_BATTERY_MSGS
+
+    env.storage.set_json(KEY_LOW_BATTERY_MSGS, [{"chat": -200, "message_id": 55}])
+    bot = TrackingBot()
+    await bot_mod.clear_low_battery(bot, env.bd)
+    assert bot.deleted == [(-200, 55)]
+    assert env.storage.get_json(KEY_LOW_BATTERY_MSGS) == []
+
+
+async def test_groups_are_cleared_independently(env):
+    from vydpobot.storage import KEY_PENDING_ALERTS
+
+    seed(env, -200)
+    bot = TrackingBot()
+    now = datetime.now(UTC)
+    await bot_mod.deliver_alerts(
+        bot, env.bd, ["🔋 other"], now, low_battery=["🪫 40%"], tracked=[("stale", "⚠️ stale")]
+    )
+    await bot_mod.deliver_alerts(bot, env.bd, [], now, tracked=[("equip:k", "🔴 Lift")])
+    # 701 low battery, 702 stale, 703 plain (never deleted), 704 Lift
+    await bot_mod.clear_alerts(bot, env.bd, "stale")
+    assert bot.deleted == [(-200, 702)]
+    await bot_mod.clear_alerts(bot, env.bd, "equip:k")
+    await bot_mod.clear_alerts(bot, env.bd, "equip:k")  # nothing left: no-op
+    assert bot.deleted == [(-200, 702), (-200, 704)]
+    # undelivered tracked alerts are dropped from the queue when resolved
+    env.bd["settings"].alert_chat_id = 0
+    env.storage.set_json(KEY_LIVE_MESSAGES, {})
+    await bot_mod.deliver_alerts(bot, env.bd, ["plain"], now, tracked=[("stale", "⚠️ again")])
+    await bot_mod.clear_alerts(bot, env.bd, "stale")
+    assert [p["text"] for p in env.storage.get_json(KEY_PENDING_ALERTS)] == ["plain"]
+
+
+async def test_poll_job_deletes_stale_warning_when_back_online(env, monkeypatch):
+    seed(env, -200)
+    calls = []
+
+    async def fake_poll(bd, now):
+        return bot_mod.PollResult(back_online=True, snapshot=snap())
+
+    async def fake_clear(bot, bd, group):
+        calls.append(group)
+
+    monkeypatch.setattr(bot_mod, "poll_once", fake_poll)
+    monkeypatch.setattr(bot_mod, "clear_alerts", fake_clear)
+    await bot_mod.poll_job(ctx(env))
+    assert calls == ["stale"] and not env.bot.sent  # no "data is back" message
 
 
 async def test_poll_job_cleans_up_on_restore(env, monkeypatch):

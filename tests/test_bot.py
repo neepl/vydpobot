@@ -102,7 +102,6 @@ def test_format_event() -> None:
     no_load = format_event(AlertEvent("drop", soc=47, level=50), "en", snap(load_w=None))
     assert "n/a" in no_load
     assert "1 hour ago" in format_event(AlertEvent("stale", stale_seconds=3700), "en")
-    assert format_event(AlertEvent("back_online"), "uk")
 
 
 def test_access() -> None:
@@ -164,7 +163,7 @@ def bd(tmp_path: Path):
 
 async def poll_alerts(bd, now: datetime) -> list[str]:
     result = await poll_once(bd, now)
-    return result.low_battery + result.alerts
+    return result.low_battery + result.stale + result.alerts
 
 
 def at(minutes: int) -> datetime:
@@ -200,8 +199,8 @@ async def test_stale_then_back_online(bd) -> None:
     msgs = await poll_alerts(bd, at(45))  # same logger ts, 45 min old
     assert len(msgs) == 1 and "No new data" in msgs[0]
     assert await poll_alerts(bd, at(50)) == []  # already notified
-    msgs = await poll_alerts(bd, at(71))  # fresh data
-    assert len(msgs) == 1 and "flowing again" in msgs[0]
+    back = await poll_once(bd, at(71))  # fresh data: the warning is deleted, no message
+    assert back.back_online and not back.stale and not back.alerts and not back.low_battery
 
 
 async def test_three_failures_one_notice(bd) -> None:
@@ -212,8 +211,8 @@ async def test_three_failures_one_notice(bd) -> None:
     assert len(results[2]) == 1 and "No new data" in results[2][0]
     assert results[3] == [] and results[4] == []
     bd["source"].queue = [snap(ts=at(40))]
-    msgs = await poll_alerts(bd, at(41))
-    assert len(msgs) == 1 and "flowing again" in msgs[0]
+    back = await poll_once(bd, at(41))
+    assert back.back_online and not back.stale and not back.alerts
     assert bd["fail_count"] == 0
 
 
