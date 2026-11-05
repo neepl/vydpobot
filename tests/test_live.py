@@ -854,3 +854,67 @@ async def test_pending_alerts_expire_after_12_hours(env):
     await bot_mod.deliver_alerts(bot, env.bd, ["new"], now + timedelta(hours=13))
     assert [m for c, m in bot.sent if c == -200] == ["new"]  # the stale alert is dropped
     assert env.storage.get_json(KEY_PENDING_ALERTS) == []
+
+
+# ------------------------------------------------------------------ low-battery cleanup
+
+
+class TrackingBot(FlakyBot):
+    def __init__(self):
+        super().__init__()
+        self.next_id, self.deleted, self.delete_fail = 700, [], set()
+
+    async def send_message(self, chat_id, text, **kw):
+        await super().send_message(chat_id, text, **kw)
+        self.next_id += 1
+        return SimpleNamespace(message_id=self.next_id)
+
+    async def delete_message(self, chat_id, message_id):
+        if message_id in self.delete_fail:
+            raise BadRequest("Message can't be deleted")  # e.g. older than 48 h
+        self.deleted.append((chat_id, message_id))
+
+
+async def test_low_battery_alerts_deleted_when_battery_restored(env):
+    from vydpobot.storage import KEY_LOW_BATTERY_MSGS
+
+    seed(env, -200)
+    bot = TrackingBot()
+    now = datetime.now(UTC)
+    await bot_mod.deliver_alerts(bot, env.bd, [], now, low_battery=["🪫 40%"])
+    await bot_mod.deliver_alerts(bot, env.bd, ["⚠️ stale"], now, low_battery=["🪫 30%"])
+    tracked = env.storage.get_json(KEY_LOW_BATTERY_MSGS)
+    assert [(m["chat"], m["message_id"]) for m in tracked] == [(-200, 701), (-200, 702)]
+    bot.delete_fail = {702}  # one deletion fails: the cleanup carries on
+    await bot_mod.clear_low_battery(bot, env.bd)
+    assert bot.deleted == [(-200, 701)]
+    assert env.storage.get_json(KEY_LOW_BATTERY_MSGS) == []
+    # the other alert ("stale") was never tracked, so it is never deleted
+    assert all(mid != 703 for _, mid in bot.deleted)
+
+
+async def test_restore_drops_pending_low_battery_alerts(env):
+    from vydpobot.storage import KEY_PENDING_ALERTS
+
+    env.bd["settings"].alert_chat_id = 0  # nowhere to deliver: alerts stay pending
+    bot = TrackingBot()
+    now = datetime.now(UTC)
+    await bot_mod.deliver_alerts(bot, env.bd, ["⚠️ stale"], now, low_battery=["🪫 40%"])
+    await bot_mod.clear_low_battery(bot, env.bd)
+    assert [p["text"] for p in env.storage.get_json(KEY_PENDING_ALERTS)] == ["⚠️ stale"]
+
+
+async def test_poll_job_cleans_up_on_restore(env, monkeypatch):
+    seed(env, -200)
+    calls = []
+
+    async def fake_poll(bd, now):
+        return bot_mod.PollResult(battery_restored=True, snapshot=snap())
+
+    async def fake_clear(bot, bd):
+        calls.append("clear")
+
+    monkeypatch.setattr(bot_mod, "poll_once", fake_poll)
+    monkeypatch.setattr(bot_mod, "clear_low_battery", fake_clear)
+    await bot_mod.poll_job(ctx(env))
+    assert calls == ["clear"] and not env.bot.sent  # no "recovered" message

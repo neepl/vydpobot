@@ -151,7 +151,7 @@ coordinate by keeping keys namespaced):
   `status.grid_import`, `status.grid_export`, `status.grid_idle`, `status.battery`
   ({soc}), `status.bat_charging` ({power}), `status.bat_discharging` ({power}),
   `status.bat_unknown`, `status.na`, `status.stale_warning` ({ago})
-- alerts: `alert.drop` ({soc}, {level}, {power}), `alert.recovered` ({soc}),
+- alerts: `alert.drop` ({soc}, {level}, {power}),
   `alert.stale` ({ago}), `alert.back_online`
 - chart: `chart.title` ({hours}), `chart.power_axis` (kW), `chart.soc_axis`, `chart.pv`,
   `chart.load`, `chart.battery`, `chart.grid`, `chart.threshold`, `chart.no_data`,
@@ -197,7 +197,10 @@ def evaluate_staleness(state, data_ts: datetime, now: datetime, stale_after_min:
    until re-armed (e.g. 0 or negative is fine since soc>=0 — but soc 0 <= 0 must not spam:
    only fire when L < previous A, i.e. strictly new level).
 3. **Full recovery**: if soc >= threshold + hysteresis: if in_alert emit `recovered(soc)`;
-   reset to `AlertState(stale_notified=state.stale_notified)`.
+   reset to `AlertState(stale_notified=state.stale_notified)`. The bot sends no message for
+   `recovered`: `PollResult.battery_restored` makes `poll_job` call `clear_low_battery`, which
+   deletes the tracked low-battery messages (`KEY_LOW_BATTERY_MSGS`, filled by `deliver_alerts`
+   from the `low_battery` list) and drops pending low-battery alerts. Default step: 10%.
 4. **Partial re-arm** (soc rose but not fully recovered): `cand` = largest level <= soc - hysteresis;
    `next_level = min(threshold, max(A, cand))`. Example thr 50/step 5/hyst 5: alerted 30
    (A=25), charges to 45 -> cand 40 -> A=40 -> later drop to 40 alerts again. Oscillation

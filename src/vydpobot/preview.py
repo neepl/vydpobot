@@ -204,7 +204,7 @@ async def _run(
         ok = poll.snapshot is not None
         if not ok:
             poll_errors = cap.messages or ["Solarman poll failed"]
-        alerts += poll.alerts
+        alerts += poll.low_battery + poll.alerts
         notices += poll.admin_notices
 
         equip_error = None

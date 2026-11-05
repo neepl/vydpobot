@@ -51,7 +51,6 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "alert.drop": (
             "Battery dropped to {soc}% (passed the {level}% level). Current load: {power}."
         ),
-        "alert.recovered": "Battery recovered to {soc}%.",
         "alert.stale": "No new data from the inverter, last update {ago}.",
         "alert.undeliverable": (
             "⚠️ Alerts cannot be delivered: no chat is reachable. Send /live in the group "
@@ -216,7 +215,6 @@ MESSAGES: dict[Lang, dict[str, str]] = {
             "Заряд батареї знизився до {soc}% (пройдено рівень {level}%). "
             "Поточне споживання: {power}."
         ),
-        "alert.recovered": "Заряд батареї відновився до {soc}%.",
         "alert.stale": "Немає нових даних від інвертора, останнє оновлення {ago}.",
         "alert.undeliverable": (
             "⚠️ Сповіщення не вдається доставити: немає доступного чату. Надішліть /live у "

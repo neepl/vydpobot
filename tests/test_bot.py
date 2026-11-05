@@ -101,7 +101,6 @@ def test_format_event() -> None:
     assert "47%" in drop and "50%" in drop and "1.80 kW" in drop and "900 W" not in drop
     no_load = format_event(AlertEvent("drop", soc=47, level=50), "en", snap(load_w=None))
     assert "n/a" in no_load
-    assert "98%" in format_event(AlertEvent("recovered", soc=98), "en")
     assert "1 hour ago" in format_event(AlertEvent("stale", stale_seconds=3700), "en")
     assert format_event(AlertEvent("back_online"), "uk")
 
@@ -164,7 +163,8 @@ def bd(tmp_path: Path):
 
 
 async def poll_alerts(bd, now: datetime) -> list[str]:
-    return (await poll_once(bd, now)).alerts
+    result = await poll_once(bd, now)
+    return result.low_battery + result.alerts
 
 
 def at(minutes: int) -> datetime:
@@ -551,3 +551,11 @@ def test_sunny_outage_summary_shows_grid_off():
     )
     summary = format_live_summary(s, "uk", TZ, NOW, False)
     assert "🔌 немає" in summary and "0,0 кВт · 🔌" not in summary
+
+
+async def test_recovery_sends_nothing_and_flags_cleanup(bd) -> None:
+    bd["source"].queue = [snap(soc=48, ts=at(0)), snap(soc=60, ts=at(5), battery_w=3000)]
+    first = await poll_once(bd, at(0))
+    assert len(first.low_battery) == 1 and not first.alerts
+    restored = await poll_once(bd, at(5))  # 60% >= threshold 50 + hysteresis 5
+    assert restored.battery_restored and not restored.low_battery and not restored.alerts

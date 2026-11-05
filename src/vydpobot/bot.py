@@ -78,6 +78,7 @@ from vydpobot.storage import (
     KEY_LANGUAGE,
     KEY_LIVE_MESSAGES,
     KEY_LIVE_RENEWED,
+    KEY_LOW_BATTERY_MSGS,
     KEY_MONTH_REPORTED,
     KEY_OUTAGE_SINCE,
     KEY_PENDING_ALERTS,
@@ -441,9 +442,6 @@ def format_event(event: AlertEvent, lang: Lang, snapshot: Snapshot | None = None
             level = event.level if event.level is not None else 0.0
             text = t(lang, "alert.drop", soc=_num(soc), level=_num(level), power=pw)
             return f"🪫 {html.escape(text)}"
-        case "recovered":
-            text = t(lang, "alert.recovered", soc=_num(event.soc or 0.0))
-            return f"✅ {html.escape(text)}"
         case "stale":
             text = t(lang, "alert.stale", ago=fmt_ago(lang, event.stale_seconds or 0.0))
             return f"⚠️ {html.escape(text)}"
@@ -741,7 +739,9 @@ async def get_station_id(bot_data: dict[str, Any]) -> int:
 class PollResult:
     """HTML messages produced by one poll cycle, by audience."""
 
-    alerts: list[str] = field(default_factory=list)  # -> alert chat
+    alerts: list[str] = field(default_factory=list)  # -> delivery chats
+    low_battery: list[str] = field(default_factory=list)  # -> delivery chats, deleted on recovery
+    battery_restored: bool = False  # SOC back above threshold + hysteresis: clean up low_battery
     admin_notices: list[str] = field(default_factory=list)  # -> admins' private chats
     snapshot: Snapshot | None = None  # fetched this cycle (None on failure)
 
@@ -827,7 +827,11 @@ async def _poll_once(bot_data: dict[str, Any], now: datetime) -> PollResult:
     except Exception:
         log.exception("Alert evaluation failed")
         return result
-    result.alerts = [format_event(e, lang, snap) for e in events]
+    result.low_battery = [format_event(e, lang, snap) for e in events if e.kind == "drop"]
+    result.battery_restored = any(e.kind == "recovered" for e in events)  # no message, cleanup
+    result.alerts = [
+        format_event(e, lang, snap) for e in events if e.kind not in ("drop", "recovered")
+    ]
     return result
 
 
@@ -1544,15 +1548,17 @@ def delivery_chats(bd: dict[str, Any]) -> list[int]:
     return live or ([alert] if alert else [])
 
 
-async def broadcast(bot: Any, chats: list[int], messages: list[str]) -> set[str]:
+async def broadcast(
+    bot: Any, chats: list[int], messages: list[str]
+) -> dict[str, list[tuple[int, int | None]]]:
     """Send each HTML message to each chat; a failing chat does not stop the others.
-    Returns the messages that reached at least one chat."""
-    delivered: set[str] = set()
+    Returns {message: [(chat_id, message_id), ...]} for the messages that reached a chat."""
+    delivered: dict[str, list[tuple[int, int | None]]] = {}
     for chat_id in chats:
         for msg in messages:
             try:
-                await bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.HTML)
-                delivered.add(msg)
+                sent = await bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.HTML)
+                delivered.setdefault(msg, []).append((chat_id, getattr(sent, "message_id", None)))
             except TelegramError as e:
                 log.warning("Cannot send to chat %s: %s", chat_id, e)
     return delivered
@@ -1561,21 +1567,42 @@ async def broadcast(bot: Any, chats: list[int], messages: list[str]) -> set[str]
 PENDING_ALERT_MAX_AGE = timedelta(hours=12)  # an older alert is no longer useful
 
 
-async def deliver_alerts(bot: Any, bd: dict[str, Any], new: list[str], now: datetime) -> None:
+async def deliver_alerts(
+    bot: Any,
+    bd: dict[str, Any],
+    new: list[str],
+    now: datetime,
+    *,
+    low_battery: list[str] | tuple[str, ...] = (),
+) -> None:
     """Send alerts to the delivery chats. An alert that reaches no chat stays pending and is
     retried at the next call (for up to 12 h), so an alert is never lost silently. When alerts
-    are stuck, the admins are told privately once (until something is delivered again)."""
+    are stuck, the admins are told privately once (until something is delivered again).
+    Low-battery alerts are remembered (chat, message id) so they can be deleted on recovery."""
     storage: Storage = bd["storage"]
     pending = [
         p
         for p in storage.get_json(KEY_PENDING_ALERTS) or []
         if now - datetime.fromisoformat(p["at"]) <= PENDING_ALERT_MAX_AGE
     ]
-    queue = pending + [{"text": m, "at": now.isoformat()} for m in new]
+    queue = pending + [
+        {"text": m, "at": now.isoformat(), "kind": "low_battery"} for m in low_battery
+    ]
+    queue += [{"text": m, "at": now.isoformat()} for m in new]
     if not queue:
         return
     chats = delivery_chats(bd)
-    delivered = await broadcast(bot, chats, [q["text"] for q in queue]) if chats else set()
+    delivered = await broadcast(bot, chats, [q["text"] for q in queue]) if chats else {}
+    sent_low = [
+        {"chat": c, "message_id": mid}
+        for q in queue
+        if q.get("kind") == "low_battery"
+        for c, mid in delivered.get(q["text"], [])
+        if mid is not None
+    ]
+    if sent_low:
+        tracked = storage.get_json(KEY_LOW_BATTERY_MSGS) or []
+        storage.set_json(KEY_LOW_BATTERY_MSGS, tracked + sent_low)
     remaining = [q for q in queue if q["text"] not in delivered]
     storage.set_json(KEY_PENDING_ALERTS, remaining)
     if delivered:
@@ -1590,6 +1617,20 @@ async def deliver_alerts(bot: Any, bd: dict[str, Any], new: list[str], now: date
             storage.set_json(KEY_UNDELIVERABLE_NOTIFIED, True)
 
 
+async def clear_low_battery(bot: Any, bd: dict[str, Any]) -> None:
+    """Battery restored: delete the low-battery alerts sent during the discharge and drop any
+    still pending. Telegram only deletes messages younger than 48 h; older ones stay."""
+    storage: Storage = bd["storage"]
+    for m in storage.get_json(KEY_LOW_BATTERY_MSGS) or []:
+        try:
+            await bot.delete_message(chat_id=m["chat"], message_id=m["message_id"])
+        except TelegramError as e:
+            log.info("Cannot delete low-battery alert in chat %s: %s", m["chat"], e)
+    storage.set_json(KEY_LOW_BATTERY_MSGS, [])
+    pending = storage.get_json(KEY_PENDING_ALERTS) or []
+    storage.set_json(KEY_PENDING_ALERTS, [p for p in pending if p.get("kind") != "low_battery"])
+
+
 def admin_targets(bd: dict[str, Any]) -> list[int]:
     """Private chats of the admins (chat id == user id); the delivery chats if there are none."""
     return list(bd["settings"].admin_user_ids) or delivery_chats(bd)
@@ -1601,7 +1642,9 @@ async def poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         now = datetime.now(UTC)
         result = await poll_once(bd, now)
-        await deliver_alerts(context.bot, bd, result.alerts, now)
+        if result.battery_restored:
+            await clear_low_battery(context.bot, bd)
+        await deliver_alerts(context.bot, bd, result.alerts, now, low_battery=result.low_battery)
         if result.admin_notices:
             await broadcast(context.bot, admin_targets(bd), result.admin_notices)
     except Exception:

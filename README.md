@@ -18,8 +18,10 @@ SUN-xK-SG04LP3) through the Solarman Cloud OpenAPI. It runs in Docker on a small
 - `/status`: a power-flow diagram (solar, grid, battery, home, with flow direction and power)
   and a text summary caption with a 10-cell battery SOC bar.
 - Battery alerts: a message when SOC falls to a threshold (default 50 %) and at every further
-  step (45 %, 40 %, ...), a "recovered" message once SOC climbs back above the threshold plus a
-  hysteresis. Oscillation around a level does not spam.
+  step of `ALERT_STEP_PCT` (default 10 %: 40 %, 30 %, ...). When SOC climbs back above the
+  threshold plus a hysteresis (default 55 %), the bot deletes these low-battery messages from the
+  chat (Telegram allows this for messages younger than 48 hours). There is no separate
+  "recovered" message. Oscillation around a level does not spam.
 - Stale-data and outage detection: warns when the logger stops reporting, or when polling fails
   three times in a row, and tells you when it is back.
 - `/graph [hours]`: chart of PV, load, battery, grid and SOC (1..48 h, default 24) with an
