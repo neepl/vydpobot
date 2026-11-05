@@ -26,7 +26,7 @@ SUN-xK-SG04LP3) through the Solarman Cloud OpenAPI. It runs in Docker on a small
   three times in a row, and tells you when it is back.
 - `/graph [hours]`: chart of PV, load, battery, grid and SOC (1..48 h, default 24) with an
   energy summary.
-- `/month [YYYY-MM]`: grouped daily bars (solar, consumption, from grid) and monthly totals with
+- `/month [YYYY-MM]`: one bar per day for consumption (own energy and grid parts) and monthly totals with
   the self-sufficiency percentage; a report of the previous month is posted automatically on the
   1st (OpenAPI backend). See "Monthly statistics".
 - A monthly rollover: the old live message becomes the monthly report and a new live message is
@@ -548,8 +548,11 @@ does not send a notification.
 
 ## Monthly statistics
 
-`/month` (allowed chats) shows grouped daily bars for solar generation, home consumption and
-energy bought from the grid, plus a caption with the totals. `/month 2026-09` shows another
+`/month` (allowed chats) shows one bar per day. The bar height is the consumption of the day. The
+bottom part (amber) is the own energy: solar, directly or through the battery. The top part (grey)
+is the energy bought from the grid. The kWh value is written inside each part when it is large
+enough. Grid energy above the consumption went into the battery, so the grid part is capped at the
+consumption. A caption shows the totals. `/month 2026-09` shows another
 month; future months are rejected. Today's bars are drawn lighter and hatched because the day is
 not finished.
 

@@ -345,9 +345,12 @@ needs the "Delete messages" right).
   propagates.
 - `month_summary(days)`: totals (None = 0), `days_with_data`, `self_sufficiency = 1 - import/home`
   clamped 0..1 (None if home is 0), `pv_share = pv/home` capped at 1.
-- `charts.render_month_chart(days, *, year, month, tz, lang, now=None)`: Figure only, 12x8 in at
-  100 dpi; grouped bars PV (C_PV), home (C_LOAD), grid import (C_GRID); x = day numbers 1..N;
-  title "<Month> <year>"; y axis kWh / кВт·год; legend; today hatched with alpha 0.45; no data ->
+- `charts.render_month_chart(days, *, year, month, tz, lang, now=None)`: Figure only, 12x4.2 in
+  at 100 dpi. One stacked bar per day = `home_kwh`: `month_split(d)` -> own = home − grid (C_PV,
+  bottom, legend `month.own`) and grid = min(grid_import, home) (C_GRID, top, `month.grid`). The
+  kWh integer is written inside a part when it is >= 8% of the tallest bar (INK on own, white on
+  grid, INK on today's partial bar). x = day numbers 1..N; title "<Month> <year>" with the legend
+  on the same line; y axis kWh / кВт·год; today hatched with alpha 0.45; no data ->
   `chart.no_data` text.
 - Caption (HTML-escaped): `📅 Month Year[ (1–D)]`, ☀️ Solar, 🏠 Consumption, 🔌 From grid,
   `↗️ To grid` only if > 0, 🔋 Self-sufficiency. The range only for the current month.

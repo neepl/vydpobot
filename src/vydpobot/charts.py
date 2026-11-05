@@ -4,7 +4,7 @@ import calendar
 import io
 import math
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import matplotlib
@@ -265,6 +265,55 @@ def render_chart(
     return buf.getvalue()
 
 
+MONTH_BAR_W = 0.78
+MONTH_LABEL_MIN = 0.08  # write the kWh inside a part only if it is >= 8% of the tallest bar
+
+
+def month_split(d: DayStats) -> tuple[float, float]:
+    """(own, from grid) parts of a day's consumption. Grid energy above the consumption went into
+    the battery, so the grid part is capped at the consumption."""
+    home = d.home_kwh or 0.0
+    grid = min(d.grid_import_kwh or 0.0, home)
+    return home - grid, grid
+
+
+def _month_bars(ax: Axes, by_day: dict[int, DayStats], today: date, lang: Lang) -> None:
+    xs = sorted(by_day)
+    parts = {x: month_split(by_day[x]) for x in xs}
+    tallest = max((own + grid for own, grid in parts.values()), default=0.0)
+    for label, color, ink, pick in (
+        ("month.own", C_PV, INK, lambda o, g: (0.0, o)),
+        ("month.grid", C_GRID, "white", lambda o, g: (o, g)),
+    ):
+        for partial in (False, True):
+            sel = [x for x in xs if (by_day[x].day == today) is partial]
+            if not sel:
+                continue
+            bottoms, heights = zip(*(pick(*parts[x]) for x in sel), strict=True)
+            style = {"alpha": 0.45, "hatch": "//", "edgecolor": color, "linewidth": 0}
+            ax.bar(
+                sel,
+                heights,
+                MONTH_BAR_W,
+                bottom=bottoms,
+                color=color,
+                label=None if partial else t(lang, label),
+                **(style if partial else {}),
+            )
+            for x, b, h in zip(sel, bottoms, heights, strict=True):
+                if tallest and h >= MONTH_LABEL_MIN * tallest:
+                    ax.text(
+                        x,
+                        b + h / 2,
+                        f"{h:.0f}",
+                        ha="center",
+                        va="center",
+                        fontsize=FONT - 4.5,
+                        color=INK if partial else ink,  # white is unreadable on a light bar
+                        fontweight="bold",
+                    )
+
+
 def render_month_chart(
     days: list[DayStats],
     *,
@@ -274,17 +323,19 @@ def render_month_chart(
     lang: Lang,
     now: datetime | None = None,
 ) -> bytes:
-    """Grouped daily bars (solar, consumption, from grid) for one month; today is hatched."""
+    """One stacked bar per day = consumption: own energy (solar, directly or via the battery)
+    at the bottom, bought from the grid on top, kWh inside each part. Today is hatched."""
     today = (now or datetime.now(tz)).astimezone(tz).date()
     n = calendar.monthrange(year, month)[1]
-    by_day = {d.day.day: d for d in days if (d.day.year, d.day.month) == (year, month)}
-    # Compact strip (~1200x360): the month chart is read at a glance, not studied.
-    fig = Figure(figsize=(12, 3.6), dpi=100, facecolor="white", layout="constrained")
+    by_day = {
+        d.day.day: d
+        for d in days
+        if (d.day.year, d.day.month) == (year, month) and d.home_kwh is not None
+    }
+    fig = Figure(figsize=(12, 4.2), dpi=100, facecolor="white", layout="constrained")
     title = f"{month_name(lang, month)} {year}"
-    if not any(
-        v is not None for d in by_day.values() for v in (d.pv_kwh, d.home_kwh, d.grid_import_kwh)
-    ):
-        ax = fig.add_subplot(111)
+    ax = fig.add_subplot(111)
+    if not by_day:
         ax.set_axis_off()
         ax.text(
             0.5,
@@ -298,38 +349,8 @@ def render_month_chart(
         )
         fig.suptitle(title, fontsize=FONT + 3, color=INK, x=0.02, ha="left")
     else:
-        ax = fig.add_subplot(111)
         _style(ax, t(lang, "month.axis"))
-        width = 0.27
-        series = (
-            ("chart.pv", C_PV, lambda d: d.pv_kwh, -width),
-            ("chart.load", C_LOAD, lambda d: d.home_kwh, 0.0),
-            ("month.grid", C_GRID, lambda d: d.grid_import_kwh, width),
-        )
-        for label, color, get, offset in series:
-            xs, hs, partial_x, partial_h = [], [], [], []
-            for day, d in by_day.items():
-                v = get(d)
-                if v is None:
-                    continue
-                if d.day == today:
-                    partial_x.append(day + offset)
-                    partial_h.append(v)
-                else:
-                    xs.append(day + offset)
-                    hs.append(v)
-            ax.bar(xs, hs, width=width, color=color, label=t(lang, label))
-            if partial_x:  # today is incomplete: lighter and hatched
-                ax.bar(
-                    partial_x,
-                    partial_h,
-                    width=width,
-                    color=color,
-                    alpha=0.45,
-                    hatch="//",
-                    edgecolor=color,
-                    linewidth=0,
-                )
+        _month_bars(ax, by_day, today, lang)
         ax.set_xlim(0.4, n + 0.6)
         ax.set_xticks(range(1, n + 1))
         ax.tick_params(axis="x", labelsize=FONT - 4)
@@ -337,7 +358,7 @@ def render_month_chart(
         ax.legend(  # top-right, on the title's line, to save height
             loc="lower right",
             bbox_to_anchor=(1.0, 1.0),
-            ncol=3,
+            ncol=2,
             frameon=False,
             fontsize=FONT - 1,
             columnspacing=1.5,

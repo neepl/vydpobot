@@ -94,3 +94,44 @@ def test_summarize_ignores_gaps_and_none():
 def test_summarize_empty_and_unsorted():
     assert set(summarize([]).values()) == {0.0}
     assert summarize(list(reversed(const(1))))["pv_kwh"] == pytest.approx(1.0)
+
+
+# ------------------------------------------------------------------ monthly chart (variant A)
+
+
+def test_month_split_own_and_grid():
+    from datetime import date
+
+    from vydpobot.charts import month_split
+    from vydpobot.models import DayStats
+
+    # real 1 Oct 2026: consumption 82.3 = own 50.0 + grid 32.3
+    own, grid = month_split(DayStats(date(2026, 10, 1), 53.2, 82.3, 32.3, 0.0, 29.8, 26.6))
+    assert round(own, 1) == 50.0 and grid == 32.3
+    # grid above consumption (battery charged from the grid): grid capped, own 0
+    assert month_split(DayStats(date(2026, 10, 18), 0.0, 59.9, 70.0)) == (0.0, 59.9)
+    assert month_split(DayStats(date(2026, 10, 2), None, 10.0, None)) == (10.0, 0.0)
+
+
+def test_month_chart_one_bar_per_day_with_kwh_labels():
+    from datetime import date
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from matplotlib.figure import Figure
+
+    from vydpobot.charts import _month_bars
+    from vydpobot.models import DayStats
+
+    days = {
+        1: DayStats(date(2026, 10, 1), 53.2, 82.3, 32.3),
+        2: DayStats(date(2026, 10, 2), 0.0, 60.0, 59.0),  # own 1 kWh: too small for a label
+    }
+    ax = Figure().add_subplot(111)
+    _month_bars(ax, days, date(2026, 10, 20), "uk")
+    labels = sorted(t.get_text() for t in ax.texts)
+    assert labels == ["32", "50", "59"]  # 1 kWh part has no label
+    assert {p.get_x() + p.get_width() / 2 for p in ax.patches} == {1.0, 2.0}  # one bar per day
+    legend = [h.get_label() for h in ax.containers]
+    assert legend == ["Власна (сонце + батарея)", "З мережі"]
