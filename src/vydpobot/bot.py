@@ -17,8 +17,6 @@ from telegram import (
     BotCommandScopeAllGroupChats,
     BotCommandScopeAllPrivateChats,
     BotCommandScopeChat,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
     InputMediaPhoto,
     ReplyParameters,
     Update,
@@ -147,7 +145,6 @@ EQUIP_EMOJI = {
 NOT_FOUND_EMOJI = "❓"
 
 COMMANDS = ("start", "status", "graph", "month", "health", "settings", "stop", "help")
-OPEN_BOT_DELETE_S = 60  # the "open the bot" reply in a group disappears after this long
 
 
 # --------------------------------------------------------------------------- pure helpers
@@ -1170,42 +1167,13 @@ def _chat_ids_for_membership(bd: dict[str, Any]) -> list[int]:
     return [*ids, *(c for c in bd["settings"].allowed_chat_ids if c not in ids)]
 
 
-async def _delete_later(context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id, message_id = context.job.data  # type: ignore[union-attr,misc]
-    with suppress(Exception):
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-
-
-async def _redirect_to_private(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """A command in a group: delete it, point to the private chat with a button, and delete that
-    reply after a minute. Channel posts have no user and are never answered."""
-    chat, message, user = update.effective_chat, update.effective_message, update.effective_user
-    if chat is None or message is None or user is None or chat.type == ChatType.CHANNEL:
-        return
-    bd = context.application.bot_data
-    with suppress(Exception):  # best effort; may lack delete rights
-        await message.delete()
-    button = InlineKeyboardButton(
-        t(get_lang(bd), "group.open_bot"), url=f"https://t.me/{context.bot.username}?start=go"
+def _ignore_group_command(update: Update) -> None:
+    """A command outside a private chat: the bot stays silent there (no reply, nothing deleted),
+    so the main chat never shows what the bot can do."""
+    chat, user = update.effective_chat, update.effective_user
+    log.debug(
+        "Ignored command in chat %s from user %s", chat.id if chat else None, user and user.id
     )
-    try:
-        sent = await context.bot.send_message(
-            chat_id=chat.id,
-            text=html.escape(t(get_lang(bd), "group.use_private")),
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[button]]),
-            message_thread_id=getattr(message, "message_thread_id", None)
-            if getattr(message, "is_topic_message", False)
-            else None,
-        )
-    except TelegramError as e:
-        log.info("Cannot answer in chat %s: %s", chat.id, e)
-        return
-    jq = getattr(context, "job_queue", None)
-    if jq is not None:
-        jq.run_once(
-            _delete_later, when=OPEN_BOT_DELETE_S, data=(chat.id, sent.message_id), name="open_bot"
-        )
 
 
 async def _access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Lang | None:
@@ -1215,7 +1183,7 @@ async def _access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Lang | 
     if chat is None:
         return None
     if chat.type != ChatType.PRIVATE:
-        await _redirect_to_private(update, context)
+        _ignore_group_command(update)
         return None
     bd = context.application.bot_data
     if user is None:
@@ -1620,15 +1588,20 @@ async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             lang = user_lang(bd, user)
             await _reply(update, html.escape(t(lang, "bot.admin_only")))
         else:
-            await _redirect_to_private(update, context)
+            _ignore_group_command(update)
         return
+    assert user is not None
     bot, private = context.bot, chat.type == ChatType.PRIVATE
-    lang = user_lang(bd, user) if private else get_lang(bd)
+    lang = user_lang(bd, user)
 
     async def say(msg_key: str, **kw: Any) -> None:
-        await bot.send_message(
-            chat_id=chat.id, text=html.escape(t(lang, msg_key, **kw)), parse_mode=ParseMode.HTML
-        )
+        """Answers go to the admin's private chat, never into the group."""
+        try:
+            await bot.send_message(
+                chat_id=user.id, text=html.escape(t(lang, msg_key, **kw)), parse_mode=ParseMode.HTML
+            )
+        except TelegramError as e:
+            log.warning("Cannot answer /live to admin %s privately (%s): %s", user.id, msg_key, e)
 
     args = list(context.args or [])
     off = bool(args) and args[0].lower() == "off"
@@ -1750,8 +1723,15 @@ async def cmd_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             chat_id=chat.id, text=html.escape(t(lang, key)), parse_mode=ParseMode.HTML
         )
 
-    if chat.type != ChatType.PRIVATE:
-        await say("token.private_only")
+    if chat.type != ChatType.PRIVATE:  # deleted above (it may hold the secret); silent here
+        if user is not None and is_admin(user.id, settings):
+            lang = user_lang(bd, user)
+            with suppress(TelegramError):
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text=html.escape(t(lang, "token.private_only")),
+                    parse_mode=ParseMode.HTML,
+                )
     elif not is_admin(user.id if user else None, settings):
         await say("bot.admin_only")
     elif settings.solarman_backend != "portal":

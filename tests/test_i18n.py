@@ -17,7 +17,7 @@ REQUIRED = [
     "bot.lang.invalid", "bot.lang.name.en", "bot.lang.name.uk", "bot.error",
     "bot.graph.invalid", "unit.w", "unit.kw", "time.ago.min", "time.ago.h", "time.just_now",
     "alert.back_online", "alert.battery_restored", "equip.recovered", "bot.not_member",
-    "group.use_private", "group.open_bot", "sub.need_start", "sub.stopped", "settings.title",
+    "sub.need_start", "sub.stopped", "settings.title",
     "settings.on", "settings.off", "live.list", "live.usage", "live.target_not_found",
 ]  # fmt: skip
 

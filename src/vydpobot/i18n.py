@@ -93,8 +93,6 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "alert.battery_restored": "Battery recharged to {soc}%.",
         "equip.recovered": "{name} is back up (was down {duration})",
         "bot.not_member": "This bot is for members of the building chat.",
-        "group.use_private": "Commands work in a private chat with the bot.",
-        "group.open_bot": "Open the bot",
         "sub.need_start": "Send /start first.",
         "sub.stopped": (
             "Alerts are off. You can still use /status, /graph, /month and /health. "
@@ -287,8 +285,6 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "alert.battery_restored": "Батарею заряджено до {soc}%.",
         "equip.recovered": "{name} знову в нормі (не працювало {duration})",
         "bot.not_member": "Цей бот для учасників чату будинку.",
-        "group.use_private": "Команди працюють у приватному чаті з ботом.",
-        "group.open_bot": "Відкрити бота",
         "sub.need_start": "Спершу надішліть /start.",
         "sub.stopped": (
             "Сповіщення вимкнено. Команди /status, /graph, /month і /health працюють далі. "

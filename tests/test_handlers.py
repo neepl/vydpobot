@@ -290,40 +290,31 @@ async def test_handler_matrix(make_env, chat_key, handler, args, outcome, lang) 
 @pytest.mark.parametrize("lang", SUPPORTED)
 @pytest.mark.parametrize("chat_key", ["group_admin", "group_user", "unknown_group"])
 @pytest.mark.parametrize("handler", list(HANDLERS))
-async def test_group_command_is_deleted_and_points_to_the_private_chat(
-    make_env, chat_key, handler, lang
-) -> None:
+async def test_group_command_is_silently_ignored(make_env, chat_key, handler, lang) -> None:
+    """The main chat never shows what the bot can do: no reply, nothing deleted."""
     env = make_env(chat_key, lang)
     replies = await env.run(HANDLERS[handler], ["60"])
-    chat_id = CHATS[chat_key][0]
-    assert replies == [] and env.message.deleted
-    assert env.bot.sent == [(chat_id, html.escape(t(lang, "group.use_private")))]
-    (button,) = env.bot.markups[0].inline_keyboard[0]
-    assert button.text == t(lang, "group.open_bot")
-    assert button.url == "https://t.me/vydpo_bot?start=go"
-    ((_, when, data),) = env.jobs.once  # the reply disappears after 60 s
-    assert when == 60 and data == (chat_id, 901)
+    assert replies == [] and env.bot.sent == [] and not env.message.deleted
     assert env.storage.get_json(KEY_THRESHOLD) is None  # nothing was changed
 
 
-async def test_group_reply_is_deleted_by_the_job(make_env) -> None:
-    env = make_env("group_user", "en")
-    await env.run(bot_mod.cmd_status, [])
-    callback, _, data = env.jobs.once[0]
-    await callback(SimpleNamespace(job=SimpleNamespace(data=data), bot=env.bot))
-    assert env.bot.deleted == [(ALERT_CHAT, 901)]
-
-
-async def test_group_command_survives_missing_delete_rights_and_job_queue(make_env) -> None:
-    env = make_env("group_user", "en")
-
-    async def boom() -> None:
-        raise BadRequest("no rights")
-
-    env.message.delete = boom
-    env.jobs = None  # type: ignore[assignment]
-    await env.run(bot_mod.cmd_help, [])
-    assert env.bot.sent  # the reply still goes out
+@pytest.mark.parametrize(
+    "handler",
+    [
+        bot_mod.cmd_start,
+        bot_mod.cmd_stop,
+        bot_mod.cmd_settings,
+        bot_mod.cmd_month,
+        bot_mod.cmd_health,
+    ],
+)
+@pytest.mark.parametrize("chat_key", ["group_admin", "group_user"])
+async def test_other_group_commands_are_silent_too(make_env, chat_key, handler) -> None:
+    env = make_env(chat_key, "en")
+    before = env.storage.get_json("subscribers")
+    replies = await env.run(handler, [])
+    assert replies == [] and env.bot.sent == [] and not env.message.deleted
+    assert env.storage.get_json("subscribers") == before  # /start, /stop did nothing
 
 
 async def test_channel_posts_are_never_answered(make_env) -> None:
@@ -517,9 +508,11 @@ async def test_token_matrix(make_env, chat_key, args, lang) -> None:
     _, chat_type, uid = CHATS[chat_key]
     assert env.message.deleted
     assert env.message.replies == []  # /token answers via bot.send_message only
-    if chat_type != "private":
-        key = "token.private_only"
-    elif uid != ADMIN:
+    if chat_type != "private":  # silent in the group; an admin is told privately
+        expected = [(ADMIN, html.escape(t(lang, "token.private_only")))] if uid == ADMIN else []
+        assert env.bot.sent == expected and env.source.tokens == []
+        return
+    if uid != ADMIN:
         key = "bot.admin_only"
     elif not args:
         key = "token.usage"

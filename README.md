@@ -299,9 +299,7 @@ The free OpenAPI tier for Smart accounts allows at most 3 plants and 200 000 cal
    anywhere in the code.
 2. Open a chat with your new bot and press Start (a bot cannot message you first). Every
    person who wants alerts does this.
-3. Optional: in BotFather, `/setprivacy` -> Disable if you want the bot to see all messages in
-   a group. Commands (`/status@your_bot`) work in groups even with privacy mode enabled, so this
-   is usually not needed.
+3. Keep privacy mode on (the BotFather default). The bot does not need to see group messages.
 
 ### Setup
 
@@ -318,9 +316,9 @@ You do not need the group ID.
 
 - The group or channel (the "main chat") gets the live message and the monthly report. No alerts.
   The main chat language is set by an admin in `/settings` (row "Main chat language").
-- Commands in a group are deleted. The bot answers with a button "Open the bot" that opens the
-  private chat. That answer disappears after a minute. Only admins can use `/live` in a group.
-  The bot never answers in channels.
+- The bot never writes anything in the main chat except the live message and the monthly report.
+  Commands typed there are ignored: no answer, nothing deleted. Only admins can use `/live` there;
+  the bot deletes that command and answers the admin in a private chat.
 - In private, the bot serves admins and the members of any chat with a live message or of any chat
   in `ALLOWED_CHAT_IDS`. It asks Telegram for the membership and remembers the answer for 10
   minutes. Others get "This bot is for members of the building chat."
@@ -516,8 +514,10 @@ Private chat with the bot:
 | `/live off <@channel or -100…>` | admins | Remove the live message from that chat |
 | `/token <value>` | admins | Portal backend only, hidden: supply a new refresh token |
 
-In a group: `/live` and `/live off` (admins) work for that group. Every other command is deleted
-and answered with an "Open the bot" button.
+In a group: `/live` and `/live off` (admins) work for that group; the command is deleted and the
+answer goes to the admin's private chat. Every other command is ignored silently. A `/token` sent
+in a group is deleted (it may hold the secret), and the admin is told privately to use a private
+chat.
 
 `/settings` shows the current choice with ✅:
 

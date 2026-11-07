@@ -306,12 +306,19 @@ async def test_live_pin_failure_keeps_message(env):
     assert last_sent(env) == html.escape(t("en", "live.no_pin_rights"))
 
 
-async def test_live_non_admin_in_a_group_is_redirected(env):
+async def test_live_non_admin_in_a_group_is_silently_ignored(env):
     message, replies = await run_cmd(env, [], user=USER)
-    assert replies == [] and message.deleted
-    assert last_sent(env) == html.escape(t("en", "group.use_private"))
+    assert replies == [] and not message.deleted and env.bot.sent == []
     assert not env.bot.photos
     assert live(env) is None
+
+
+async def test_live_in_a_group_answers_the_admin_privately(env):
+    prime(env)
+    message, replies = await run_cmd(env, [])
+    assert replies == [] and message.deleted
+    assert [chat for chat, _ in env.bot.sent] == [ADMIN]  # nothing written into the group
+    assert last_sent(env) == t("en", "live.started")
 
 
 async def test_live_non_admin_in_private_is_refused(env):

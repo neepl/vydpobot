@@ -307,10 +307,10 @@ Access control. Private chat: admins, or users who are a member of a live chat o
 `ALLOWED_CHAT_IDS` chat (`bot.get_chat_member`; statuses creator/owner, administrator, member, and
 restricted with `is_member`). An API error on a chat counts as "not a member of that chat". The
 answer is cached per user for 10 minutes in `bot_data["member_cache"]`. Others get `bot.not_member`.
-Group chat: `/live` and `/live off` for admins; every other command, from anyone, is deleted and
-answered with an inline button "Open the bot" (`https://t.me/<username>?start=go`); the reply is
-deleted after 60 s (`job_queue.run_once`). Channels are never answered (no user). `/token` keeps
-its own private-only check. A daily `membership_job` deactivates active non-admin subscribers who
+Group chat: the bot is silent. `/live` and `/live off` work for admins: the command is deleted
+and every answer goes to the admin's private chat (a failed DM is logged). Every other command,
+from anyone, is ignored (`_ignore_group_command`: no reply, nothing deleted). Channels are never
+answered. `/token` in a group is deleted (it may hold the secret); an admin is told privately. A daily `membership_job` deactivates active non-admin subscribers who
 are in no building chat; a user whose check errors is kept, and nobody is removed when there is
 no building chat.
 
