@@ -17,14 +17,15 @@ SUN-xK-SG04LP3) through the Solarman Cloud OpenAPI. It runs in Docker on a small
 
 - `/status`: a power-flow diagram (solar, grid, battery, home, with flow direction and power)
   and a text summary caption with a 10-cell battery SOC bar.
-- Battery alerts: a message when SOC falls to a threshold (default 50 %) and at every further
-  step of `ALERT_STEP_PCT` (default 10 %: 40 %, 30 %, ...). When SOC climbs back above the
-  threshold plus a hysteresis (default 55 %), the bot deletes these low-battery messages from the
-  chat (Telegram allows this for messages younger than 48 hours). There is no separate
-  "recovered" message. Oscillation around a level does not spam.
-- Stale-data and outage detection: warns when the logger stops reporting, or when polling fails
-  three times in a row. When data flows again, the bot deletes the warning instead of posting
-  another message.
+- Alerts come to each user's private chat with the bot. The group or channel gets only the live
+  message and the monthly report.
+- Battery alerts: a message when SOC falls to the user's level (default 50 %) and at every further
+  step (default 10 %: 40 %, 30 %, ...). Each user sets their own level and step in `/settings`.
+  When SOC climbs back above the level plus a hysteresis (default 55 %), the alerts are resolved:
+  deleted, or answered with a 🟢 message, as the user chose. Oscillation around a level does not
+  spam.
+- Stale-data and outage detection: warns every subscriber when the logger stops reporting, or when
+  polling fails three times in a row. When data flows again, the warning is resolved the same way.
 - `/graph [hours]`: chart of PV, load, battery, grid and SOC (1..48 h, default 24) with an
   energy summary.
 - `/month [YYYY-MM]`: one bar per day for consumption (own energy and grid parts) and monthly totals with
@@ -32,7 +33,8 @@ SUN-xK-SG04LP3) through the Solarman Cloud OpenAPI. It runs in Docker on a small
   1st (OpenAPI backend). See "Monthly statistics".
 - A monthly rollover: the old live message becomes the monthly report and a new live message is
   pinned. See "Fresh live message each month".
-- Runtime threshold and language (English / Ukrainian) changes, persisted in SQLite.
+- Per-user settings (alert level, step, language, auto-delete), persisted in SQLite.
+  English and Ukrainian.
 - 14 days of local samples are kept so charts still work if the cloud history call fails.
 
 ## Solarman Cloud API access
@@ -150,8 +152,8 @@ once at INFO, so the wording used during an outage can be learned.
   login the bot backs off (5 min, doubling per consecutive failure, capped at 1 h) and logs a
   warning. If you see it, stop the bot, check `SOLARMAN_EMAIL`, `SOLARMAN_PASSWORD` and the
   appId/secret (log in to the web portal to verify), then restart.
-- If the logger loses Wi-Fi, the cloud data freezes. The bot then posts a "no fresh data" alert
-  after `STALE_AFTER_MIN` minutes and deletes it when uploads resume.
+- If the logger loses Wi-Fi, the cloud data freezes. The bot then sends a "no fresh data" alert
+  after `STALE_AFTER_MIN` minutes and resolves it when uploads resume.
 
 ## Temporary: web-portal backend (unofficial)
 
@@ -295,40 +297,65 @@ The free OpenAPI tier for Smart accounts allows at most 3 plants and 200 000 cal
    (or `/mybots` -> your bot -> *API Token* if it already exists). Copy the token into
    `TELEGRAM_TOKEN`. The token alone identifies the bot; the username is not configured
    anywhere in the code.
-2. Open a chat with your new bot and press Start (a bot cannot message you first).
-   To receive alerts in a group or channel, add the bot to it first; in a channel the bot
-   must be an administrator (with permission to post messages).
+2. Open a chat with your new bot and press Start (a bot cannot message you first). Every
+   person who wants alerts does this.
 3. Optional: in BotFather, `/setprivacy` -> Disable if you want the bot to see all messages in
    a group. Commands (`/status@your_bot`) work in groups even with privacy mode enabled, so this
    is usually not needed.
 
-### Chat and user IDs
+### Setup
+
+1. Get your user ID from [@userinfobot](https://t.me/userinfobot). Put it in `ADMIN_USER_IDS`.
+2. Add the bot to the group, or make it an administrator of the channel. In a channel it needs
+   the rights to post, edit and pin messages, so that it can see the members.
+3. In the group, send `/live` (as an admin). For a channel, send `/live @channel` to the bot in a
+   private chat. The bot pins the live message there.
+4. Members open the bot and send `/start`. Admins are subscribed at startup.
 
 You do not need the group ID.
 
-1. Get your user ID from [@userinfobot](https://t.me/userinfobot). Put it in `ADMIN_USER_IDS`.
-2. Add the bot to the group.
-3. In the group, send `/live` (as an admin). The bot pins the live message there.
+### Who gets what
 
-From then on, every automatic message goes to the chats with a live message: battery alerts,
-"no fresh data" warnings, equipment alerts and the monthly report. Commands work in those chats
-for everyone. Admins can use commands in any chat.
+- The group or channel (the "main chat") gets the live message and the monthly report. No alerts.
+  The main chat language is set by an admin in `/settings` (row "Main chat language").
+- Commands in a group are deleted. The bot answers with a button "Open the bot" that opens the
+  private chat. That answer disappears after a minute. Only admins can use `/live` in a group.
+  The bot never answers in channels.
+- In private, the bot serves admins and the members of any chat with a live message or of any chat
+  in `ALLOWED_CHAT_IDS`. It asks Telegram for the membership and remembers the answer for 10
+  minutes. Others get "This bot is for members of the building chat."
+- Once a day the bot checks the subscribers again. Those who left all building chats are
+  deactivated, silently. Admins are exempt. If a check fails, the user stays.
+- A subscriber who blocks the bot is deactivated at the first failed delivery. `/start` turns
+  alerts on again.
+- Stale-data and equipment alerts go to every active subscriber, each in their own language.
+  Battery alerts use each user's own level and step.
+- If nobody is subscribed, alerts go to `ALERT_CHAT_ID` when it is set. Otherwise the bot logs an
+  error and tells the admins once.
+- A message that cannot be sent right now (timeout, network) waits and is retried, for up to
+  12 hours.
 
-Problem alerts clean up after themselves, so the chat holds only current problems. Once the
-problem is gone, the bot deletes its alerts and posts no "all good" message. This applies to
-low-battery alerts (battery recharged), "no fresh data" warnings (data flows again) and
-equipment alerts (the check is up again). Telegram lets bots delete only messages younger than
-48 hours, so an older alert stays in the chat.
+### Resolved alerts
 
-- `ALERT_CHAT_ID` is optional. The bot uses it only when no chat has a live message. At startup the
-  bot logs where automatic messages go, and it logs an error if `ALERT_CHAT_ID` is set but
-  Telegram cannot find the chat.
-- `ALLOWED_CHAT_IDS` lets more chats use the read-only commands (`/status`, `/graph`, `/month`,
-  `/health`).
-- To find a chat ID anyway: send `/status@your_bot` in the chat as a non-admin. The bot logs
-  `Ignored command from chat_id=-100… (supergroup 'Your group')`. Group IDs are negative;
-  supergroups look like `-100…`. Some group settings convert a group into a supergroup and
-  change its ID.
+When a problem is gone, the bot cleans up in each subscriber's chat. The user chooses in
+`/settings`:
+
+- Delete alerts when resolved: On (default, `ALERT_AUTODELETE`). The bot deletes its alerts and
+  sends nothing.
+- Off. The alerts stay. The bot answers the newest one with a 🟢 message (battery recharged, data
+  flowing again, check up again).
+
+This applies to low-battery alerts, "no fresh data" warnings and equipment alerts. Telegram lets
+bots delete only messages younger than 48 hours, so an older alert stays.
+
+- `ALERT_CHAT_ID` is optional. It is only a fallback: for the monthly report and the live message
+  when no chat has a live message, and for alerts when nobody is subscribed. At startup the bot
+  logs an error if it is set but Telegram cannot find the chat.
+- `ALLOWED_CHAT_IDS`: members of these chats may use the bot in private.
+- `ALERT_THRESHOLD_PCT`, `ALERT_STEP_PCT` and `ALERT_AUTODELETE` are the defaults of a new
+  subscriber.
+- To find a chat ID: send `/live` in the chat as an admin, or `/live` alone in a private chat to
+  list the chats that have a live message. Group IDs are negative; supergroups look like `-100…`.
 
 ## Configuration
 
@@ -386,7 +413,7 @@ If another virtualenv is active in your shell, prefix commands with `env -u VIRT
 
 The bot runs as a long-lived container: `docker compose up -d` starts it in the background, and
 `restart: unless-stopped` brings it back after a crash or a server reboot. All state (alert
-state, `/threshold` and `/lang` overrides, live-message IDs, the rotated portal token, and
+state, subscribers and their settings, live-message IDs, the rotated portal token, and
 stored samples) lives in `./data` on the host, so it survives restarts, rebuilds, and updates.
 
 ### First deployment (VPS)
@@ -470,34 +497,53 @@ docker compose exec vydpobot python -c "import sqlite3; s=sqlite3.connect('/app/
 
 ## Bot commands
 
+Private chat with the bot:
+
 | Command | Who | Description |
 | --- | --- | --- |
-| `/start`, `/help` | allowed chats | Show help |
-| `/status` | allowed chats | Live power flow and battery state |
-| `/graph [hours]` | allowed chats | Chart for the last 1..48 hours (default 24) |
-| `/month [YYYY-MM]` | allowed chats | Daily bars and totals for a month (default: this month; OpenAPI only) |
-| `/threshold` | allowed chats | Show current alert threshold and step |
-| `/threshold <5..100>` | admins | Set threshold (persisted; resets the alert cycle) |
-| `/lang` | allowed chats | Show current language |
-| `/lang <en\|uk>` | admins | Switch language (persisted) |
-| `/live` | admins | Start or refresh the pinned live-status message |
-| `/live off` | admins | Remove the live-status message |
-| `/health` | allowed chats | State of the building equipment monitored via healthchecks.io |
-| `/token <value>` | admins, private chat | Portal backend only, hidden: supply a new refresh token |
+| `/start` | members, admins | Subscribe to alerts; shows help and the settings |
+| `/stop` | members, admins | Turn alerts off (info commands keep working) |
+| `/help` | members, admins | Show help |
+| `/settings` | members, admins | Buttons for your alert level, step, auto-delete and language |
+| `/status` | members, admins | Live power flow and battery state |
+| `/graph [hours]` | members, admins | Chart for the last 1..48 hours (default 24) |
+| `/month [YYYY-MM]` | members, admins | Daily bars and totals for a month (default: this month; OpenAPI only) |
+| `/health` | members, admins | State of the building equipment monitored via healthchecks.io |
+| `/threshold [5..100]` | members, admins | Show or set your own alert start level |
+| `/lang [en\|uk]` | members, admins | Show or set your own language |
+| `/live` | admins | List the chats that have a live message |
+| `/live <@channel or -100…>` | admins | Start or refresh the live message in that chat |
+| `/live off <@channel or -100…>` | admins | Remove the live message from that chat |
+| `/token <value>` | admins | Portal backend only, hidden: supply a new refresh token |
 
-Access: read-only commands work in the chats with a live message, in `ALERT_CHAT_ID` and in
-`ALLOWED_CHAT_IDS`. Admins can use all commands in any chat. Others get a "not allowed" reply in
-private chats and are ignored in groups.
+In a group: `/live` and `/live off` (admins) work for that group. Every other command is deleted
+and answered with an "Open the bot" button.
+
+`/settings` shows the current choice with ✅:
+
+- Battery alerts start at: Off, 30, 40, 50, 60, 70, 80 %. A new level restarts your alert cycle.
+- Repeat every: 5, 10, 20 %.
+- Delete alerts when resolved: On, Off.
+- Language: English, Українська.
+- Admins only: Main chat language (👥). It changes the language of the live message.
+
+The command menu shows these commands in private chats (admins also see `/live`) and is empty in
+groups.
 
 ## Live status (pinned message)
 
 A single message in the group that always shows the current status: the power-flow picture plus
 a caption. The bot edits it on every poll, so it never needs a new `/status`.
 
-- `/live` (admin): creates the message, pins it silently and starts updating it. Running it again
-  just refreshes the existing message. The `/live` command itself is deleted to keep the chat clean.
-- `/live off` (admin): unpins and deletes the message and stops updating it.
-- Works in the alert group and in other allowed chats; each chat has its own live message.
+- `/live` (admin, in the group): creates the message, pins it silently and starts updating it.
+  Running it again just refreshes the existing message. The `/live` command itself is deleted to
+  keep the chat clean.
+- `/live <@channel or -100…>` (admin, in a private chat): the same for a channel or any chat the
+  bot can post in. If the bot is not an administrator there, or the chat is not found, the bot says so.
+- `/live off` (in the group) or `/live off <target>` (private): unpins and deletes the message and
+  stops updating it.
+- Each chat has its own live message. In a channel the bot also deletes the "pinned a message"
+  notice of its own pin.
 - With building-equipment monitoring on, the caption also lists every monitored check with its
   status (see "Building equipment" below).
 
@@ -505,11 +551,12 @@ a caption. The bot edits it on every poll, so it never needs a new `/status`.
 Admin -> your bot, and enable ONLY "Pin Messages". Without it the bot still keeps the message
 updated, just not pinned (it tells you so).
 
-**Notifications.** Edits are silent. Alerts stay separate notifying messages.
+**Notifications.** Edits are silent. Alerts are separate notifying messages in the private chats.
 
 **No extra API calls.** The picture is refreshed from the data already fetched by the regular
 poll (or the last stored sample if a poll fails, so the "updated ... ago" text and the stale
-warning keep aging). `/lang` and `/threshold` changes show up immediately.
+warning keep aging). A change of the main chat language shows up immediately. The caption uses the
+building threshold (`ALERT_THRESHOLD_PCT`) for the low-battery marker.
 
 The first caption line is what Telegram shows in the pinned bar:
 `🔋 47% +3.2 · ☀️ 5.1 · 🏠 2.0 · 🔌 0.1 kW · 10:35`
@@ -555,7 +602,7 @@ does not send a notification.
 
 ## Monthly statistics
 
-`/month` (allowed chats) shows one bar per day. The bar height is the consumption of the day. The
+`/month` (in the private chat) shows one bar per day. The bar height is the consumption of the day. The
 bottom part (amber) is the own energy: solar, directly or through the battery. The top part (grey)
 is the energy bought from the grid. The kWh value is written inside each part when it is large
 enough. Grid energy above the consumption went into the battery, so the grid part is capped at the
@@ -640,8 +687,9 @@ HEALTHCHECKS_CHECKS=internet, cameras, lift
 ```
 
 **Alert semantics.**
-- A check going `down` gives one alert: `🔴 Lift is down (last signal 12:35)`. When it is `up`
-  again, the bot deletes that alert and posts no message.
+- A check going `down` gives one alert to every subscriber: `🔴 Lift is down (last signal
+  12:35)`. When it is `up` again, the alert is resolved (deleted, or answered with `🟢 Lift is
+  back up`, per the user's setting).
 - Grace, started, paused and new states never alert. down -> grace -> up still counts as one
   recovery.
 - State is stored in the database, so a restart does not repeat an alert for a check that is

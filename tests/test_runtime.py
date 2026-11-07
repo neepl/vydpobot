@@ -709,9 +709,9 @@ async def test_status_and_graph_pass_runtime(env, monkeypatch):
     seen = {}
 
     async def allow(*a, **k):
-        return True
+        return "en"
 
-    monkeypatch.setattr(bot, "_guard", allow)
+    monkeypatch.setattr(bot, "_access", allow)
     monkeypatch.setattr(bot, "render_flow", lambda *a, **kw: seen.update(flow=kw) or PNG)
     monkeypatch.setattr(bot, "render_chart", lambda *a, **kw: seen.update(chart=kw) or PNG)
     photos = []
@@ -724,7 +724,9 @@ async def test_status_and_graph_pass_runtime(env, monkeypatch):
 
     msg = SimpleNamespace(reply_photo=reply_photo)
     chat = SimpleNamespace(send_action=action)
-    update = SimpleNamespace(effective_message=msg, effective_chat=chat)
+    update = SimpleNamespace(
+        effective_message=msg, effective_chat=chat, effective_user=SimpleNamespace(id=1)
+    )
     ctx = SimpleNamespace(application=SimpleNamespace(bot_data=env.bd), args=[])
     await bot.cmd_status(update, ctx)
     assert isinstance(seen["flow"]["runtime"], Runtime) and seen["flow"]["grid_off"]

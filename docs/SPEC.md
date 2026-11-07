@@ -24,6 +24,7 @@ src/vydpobot/
   charts.py            Agent B   matplotlib -> PNG bytes
   solarman/client.py   Agent A   async httpx client + normalization
   __main__.py          Agent A   CLI: run | discover | dump | portal-probe | preview
+  subscribers.py       Subscriber model, storage helpers, membership checks, settings UI
   bot.py               Agent C   python-telegram-bot v21 Application, handlers, jobs
 Dockerfile, compose.yaml, .env.example, README.md   Agent C
 ```
@@ -151,12 +152,13 @@ coordinate by keeping keys namespaced):
   `status.grid_import`, `status.grid_export`, `status.grid_idle`, `status.battery`
   ({soc}), `status.bat_charging` ({power}), `status.bat_discharging` ({power}),
   `status.bat_unknown`, `status.na`, `status.stale_warning` ({ago})
-- alerts: `alert.drop` ({soc}, {level}, {power}),
-  `alert.stale` ({ago})
+- alerts: `alert.drop` ({soc}, {level}, {power}), `alert.stale` ({ago}),
+  `alert.battery_restored` ({soc}), `alert.back_online`, `equip.recovered` ({name}, {duration})
+  (the three 🟢 texts are the "resolved" messages)
 - chart: `chart.title` ({hours}), `chart.power_axis` (kW), `chart.soc_axis`, `chart.pv`,
   `chart.load`, `chart.battery`, `chart.grid`, `chart.threshold`, `chart.no_data`,
   `chart.summary` ({pv_kwh}, {load_kwh}, {import_kwh}, {export_kwh}, {charge_kwh}, {discharge_kwh})
-- bot: `bot.help`, `bot.not_allowed`, `bot.admin_only`, `bot.threshold.current` ({threshold}, {step}),
+- bot: `bot.help`, `bot.not_member`, `bot.admin_only`, `bot.threshold.current` ({threshold}, {step}),
   `bot.threshold.set` ({threshold}), `bot.threshold.invalid`, `bot.lang.current` ({lang}),
   `bot.lang.set`, `bot.lang.invalid`, `bot.error` , `bot.graph.invalid`
 - units/time helpers: `unit.w`, `unit.kw`, `time.ago.min` ({n}), `time.ago.h` ({n}), `time.just_now`
@@ -197,32 +199,54 @@ def evaluate_staleness(state, data_ts: datetime, now: datetime, stale_after_min:
    until re-armed (e.g. 0 or negative is fine since soc>=0 — but soc 0 <= 0 must not spam:
    only fire when L < previous A, i.e. strictly new level).
 3. **Full recovery**: if soc >= threshold + hysteresis: if in_alert emit `recovered(soc)`;
-   reset to `AlertState(stale_notified=state.stale_notified)`. The bot sends no message for
-   `recovered`: `PollResult.battery_restored` makes `poll_job` call `clear_low_battery`, which
-   deletes the tracked messages of the `low_battery` group (see "Tracked alerts") and drops its
-   pending alerts. Default step: 10%.
+   reset to `AlertState(stale_notified=state.stale_notified)`. The bot resolves the user's
+   `low_battery:<uid>` group on `recovered` (see "Tracked alerts"). Default step: 10%.
 4. **Partial re-arm** (soc rose but not fully recovered): `cand` = largest level <= soc - hysteresis;
    `next_level = min(threshold, max(A, cand))`. Example thr 50/step 5/hyst 5: alerted 30
    (A=25), charges to 45 -> cand 40 -> A=40 -> later drop to 40 alerts again. Oscillation
    30<->31 never re-alerts.
-Changing threshold at runtime: bot resets state to `AlertState()` keeping stale_notified.
+Changing a subscriber's threshold or step resets that subscriber's state to `AlertState()`.
 
 `evaluate_staleness`: disabled if stale_after_min == 0. If `now - data_ts > stale_after_min`
 and not stale_notified -> emit `stale(stale_seconds)`, set flag. If fresh again and flag set ->
 emit `back_online`, clear flag.
 
-**Tracked alerts.** Problem alerts are deleted when the problem is gone, and no "resolved"
-message is sent. `deliver_alerts(..., low_battery=[text], tracked=[(group, text)])` queues them
-with `kind=group` and remembers each delivered message in `KEY_TRACKED_ALERTS` =
-`{group: [{"chat", "message_id"}]}`. The legacy `KEY_LOW_BATTERY_MSGS` list is migrated into
-`low_battery`. `clear_alerts(bot, bd, group)` deletes those messages (Telegram: only messages
-younger than 48 h; failures are logged and skipped) and drops pending entries of the group.
+**Subscribers** (`subscribers.py`). Storage key `KEY_SUBSCRIBERS` = `{str(user_id): {"active",
+"lang", "threshold" (None = battery alerts off), "step", "autodelete", "state"}}`. The state is an
+`AlertState` dict. The global `KEY_ALERT_STATE` keeps only `stale_notified`. On every new sample,
+`poll_once` runs `evaluate_soc(sub.state, soc, sub.threshold, sub.step, hysteresis)` for each
+active subscriber with a threshold, and stores the state per user. `PollResult.battery` is
+`{uid: [AlertEvent]}`; `PollResult.stale` holds the stale events; `back_online` is a flag.
+`EquipmentResult` has `down` and `recovered` lists of `EquipEvent`. Nobody formats text in
+`poll_once` or `equipment_once`: the text is built per recipient, in the recipient's language.
+
+**Delivery.** `deliver_alerts(bot, bd, [Outgoing], now)`. An `Outgoing` has a `group`, a
+`render(lang) -> html` function and an optional `uid` (one subscriber; None = every recipient).
+Recipients (`alert_recipients`): the active subscribers; if there are none, `ALERT_CHAT_ID` when
+set (main language); else nobody, and the bot logs an error. Groups and channels never receive
+alerts. The pending queue `KEY_PENDING_ALERTS` holds `{"chat", "text", "at", "kind"}`, one entry
+per recipient, expiring after 12 h; old entries without `chat` are dropped on load. A send error
+`Forbidden` or "chat not found" deactivates a subscriber and drops their pending entries. Other
+errors (TimedOut, NetworkError, RetryAfter, ...) leave the entry pending for the next call. An
+alert that reaches nobody is logged, and the admins get one notice (`KEY_UNDELIVERABLE_NOTIFIED`)
+until something is delivered again.
+
+**Tracked alerts.** Every delivered alert is remembered in `KEY_TRACKED_ALERTS` =
+`{group: [{"chat", "message_id"}]}`, whatever the user's autodelete setting. The legacy
+`KEY_LOW_BATTERY_MSGS` list is migrated into `low_battery`. `clear_alerts(bot, bd, group,
+resolved)` resolves a group and drops its pending entries. Per chat:
+- Active subscriber with autodelete on: delete the messages (Telegram: only younger than 48 h;
+  failures are logged and skipped).
+- Active subscriber with autodelete off: keep them, and send one 🟢 message, `resolved(lang)`, as a
+  reply to the newest alert (`reply_parameters` with `allow_sending_without_reply`).
+- Inactive subscriber, or a chat that is not a subscriber (a legacy group, `ALERT_CHAT_ID`): delete.
+
 The groups are:
-- `low_battery`: `PollResult.low_battery`, cleared on `battery_restored`.
-- `stale`: `PollResult.stale` (stale event, or the 3-failure note), cleared on
-  `PollResult.back_online`.
-- `equip:<check key>`: `EquipmentResult.tracked` (down events), cleared for each group in
-  `EquipmentResult.cleared` (recovered events).
+- `low_battery:<uid>`: that user's drops; resolved on their `recovered` event (🟢
+  `alert.battery_restored`).
+- `stale`: stale events and the 3-failure note; resolved on `back_online` (🟢 `alert.back_online`).
+- `equip:<check key>`: `down` events; resolved on `recovered` (🟢 `equip.recovered`).
+At startup the legacy `low_battery` group (group chats) is cleared once.
 
 Thorough parametrized tests including the examples above, skipped levels, soc 0, hysteresis 0,
 round-trip to_dict/from_dict.
@@ -274,15 +298,38 @@ python-telegram-bot v21 (async, `Application`, `JobQueue`). `def run(settings: S
 builds app with `post_init` (create SolarmanClient, Storage, resolve station id, store in
 `app.bot_data`) and `post_shutdown` (close client & storage), `run_polling()`.
 
-Effective runtime values: threshold = `storage KEY_THRESHOLD` or settings; language =
-`storage KEY_LANGUAGE` or settings.
+Effective runtime values: the building threshold (`get_threshold`) = `storage KEY_THRESHOLD` or
+`ALERT_THRESHOLD_PCT`; no command changes it. It drives the live caption and flow image and is the
+default of new subscribers. The main chat language = `storage KEY_LANGUAGE` or `LANGUAGE`. Each
+subscriber has their own threshold, step, auto-delete and language.
 
-Access control: read-only commands allowed in `alert_chat_id`, `allowed_chat_ids`, or private
-chats of `admin_user_ids`; admin commands need `effective_user.id in admin_user_ids`.
-Unauthorized -> `bot.not_allowed` (or silently ignore in groups).
+Access control. Private chat: admins, or users who are a member of a live chat or of an
+`ALLOWED_CHAT_IDS` chat (`bot.get_chat_member`; statuses creator/owner, administrator, member, and
+restricted with `is_member`). An API error on a chat counts as "not a member of that chat". The
+answer is cached per user for 10 minutes in `bot_data["member_cache"]`. Others get `bot.not_member`.
+Group chat: `/live` and `/live off` for admins; every other command, from anyone, is deleted and
+answered with an inline button "Open the bot" (`https://t.me/<username>?start=go`); the reply is
+deleted after 60 s (`job_queue.run_once`). Channels are never answered (no user). `/token` keeps
+its own private-only check. A daily `membership_job` deactivates active non-admin subscribers who
+are in no building chat; a user whose check errors is kept, and nobody is removed when there is
+no building chat.
 
-Commands (register with `set_my_commands` for both en and uk via `language_code`):
-- `/start`, `/help` -> `bot.help`
+Commands (menus via `set_my_commands`: private scope en + uk with start, status, graph, month,
+health, settings, stop, help; group scope empty; per admin `BotCommandScopeChat` with `live` added,
+failures logged):
+- `/start` (private) -> create or reactivate the subscriber, reply with `bot.help` and the settings
+  message. Defaults: threshold `get_threshold`, step `ALERT_STEP_PCT`, autodelete `ALERT_AUTODELETE`,
+  language `uk` if Telegram's `language_code` starts with `uk`, else `LANGUAGE`. At startup every
+  admin without a record gets an active one (an admin with `active: False` is left alone).
+- `/stop` -> `active = False`; the info commands keep working.
+- `/help` -> `bot.help`
+- `/settings` -> current values plus an inline keyboard, the current choice marked ✅. Callback
+  data `set:thr:<off|30..80>`, `set:step:<5|10|20>`, `set:ad:<0|1>`, `set:lang:<en|uk>`, and for
+  admins `set:mainlang:<en|uk>` (sets `KEY_LANGUAGE`, refreshes the live message). Values are
+  validated, access and admin rights are checked on callbacks, the message is edited in place
+  (`CallbackQueryHandler(pattern="^set:")`). A new threshold or step resets that user's state.
+- `/status`, `/graph`, `/month`, `/health` (private, in the user's language; `/status` and
+  `/graph` use the user's threshold, else `get_threshold`).
 - `/status` -> NO API call: the snapshot of the latest successful poll (cached in `bot_data` by
   `poll_once`), else `storage.latest_sample()` (e.g. after a restart); HTML message:
   ☀️ PV, 🏠 load, 🔌 grid (import/export/outage), then ONE battery line: level plus what the
@@ -294,9 +341,12 @@ Commands (register with `set_my_commands` for both en and uk via `language_code`
   cloud `get_history` (5-min frames; skipped at 100% of the API budget), and the fetched points
   are stored as samples (INSERT OR IGNORE); if it fails or returns < 2 points, use local samples;
   render via `asyncio.to_thread(render_chart, ...)`; send photo with caption = `chart.summary`.
-- `/threshold [value]` (admin to set; anyone allowed may view) -> validate 5..100, persist,
-  reset alert state.
-- `/lang [en|uk]` (admin to set) -> persist.
+- `/threshold [value]` (private) -> show or set the user's own start level (5..100); resets their
+  state. `/lang [en|uk]` (private) -> show or set the user's own language.
+- `/live` (admin): in a group, starts or refreshes the live message of that group; `/live off`
+  removes it. In a private chat, `/live <@channel or -100...>` and `/live off <target>` act on that
+  chat (resolved with `get_chat`; "not found" and "no rights" are reported), and `/live` alone lists
+  the live chats. The logic is `_live_on(bot, bd, chat_id, say)` and `_live_off(...)`.
 - `/month [YYYY-MM]` (read-only guard; default current month; rejects malformed/future args with
   `month.invalid`) -> `upload_photo`, `build_month_report` (`monthly.load_month` + `render_month_chart`
   + `format_month_caption`), photo with HTML caption. Errors -> `month.error` (`month.unsupported`
@@ -306,9 +356,10 @@ a legacy int value is read as created "now" and rewritten (no immediate reset).
 Jobs:
 - `poll` every `poll_interval_s` (first after 10 s): get_snapshot -> add_sample ->
   evaluate_soc (only if sample is new, i.e. logger reported fresh data) -> evaluate_staleness ->
-  persist state -> send events to alert_chat_id. Exceptions logged, never crash the job;
+  persist state -> deliver the events (see "Delivery"). Exceptions logged, never crash the job;
   after 3 consecutive poll failures send one `alert.stale`-like error note (reuse staleness flag;
   tracked in the `stale` group).
+- `membership` daily at 03:30 local time.
 - `prune` daily: keep 14 days of samples.
 - `monthly_report` (`run_daily` at `monthly_report_time`) + `monthly_startup` (once, 20 s after
   start, respects the time of day) -> `monthly_rollover`. A report failure schedules a retry in
@@ -327,7 +378,7 @@ Jobs:
 
 Both steps run under the live lock, so a poll refresh cannot overwrite the report in between:
 1. `_post_month_report`: targets are all chats with a live message (`ALERT_CHAT_ID` only when
-   there is none; nothing when that is 0). In each chat, `edit_message_media` of the live message
+   there is none; nothing when that is 0; `delivery_chats`, which never carries alerts). In each chat, `edit_message_media` of the live message
    into the report (kept), else `send_photo` the report as a new message. It raises only when no
    chat received the report.
 2. `_refresh_live(..., renew=True, keep=...)`: for a kept chat, `_rollover_live` (unpin the old
@@ -336,14 +387,16 @@ Both steps run under the live lock, so a poll refresh cannot overwrite the repor
    `{message_id, created_at: now}`.
 
 Startup: `check_alert_chat` logs an error (with the live chats as a hint) and tells the admins
-privately when `ALERT_CHAT_ID` is 0 or `get_chat` fails.
+privately when `ALERT_CHAT_ID` is set but `get_chat` fails. The bot also logs a warning when there
+are no active subscribers.
 
 A live message that a user deletes is re-created on the next refresh: the edit fails with "message
 to edit not found", and the bot sends and pins a new one.
 
-`on_pin_notice` (`MessageHandler(filters.StatusUpdate.PINNED_MESSAGE)`) deletes the service message
-when `from_user.id == bot.id` and the chat is a live chat. Failures are logged at DEBUG only (it
-needs the "Delete messages" right).
+`on_pin_notice` (`MessageHandler(filters.StatusUpdate.PINNED_MESSAGE)`, which also receives channel
+posts) deletes the service message in a live chat: in a group when `from_user.id == bot.id`, in a
+channel when the pinned message is the live message. Failures are logged at DEBUG only (it needs
+the "Delete messages" right).
 
 ### Monthly statistics (`monthly.py`)
 - `SolarmanClient.daily_stats(station_id, start, end) -> list[DayStats]`: `POST
@@ -476,7 +529,9 @@ bot.py and `__main__.py` use only `make_source`/`DataSource`.
 
 - `vydpobot preview [--out DIR] [--lang en|uk] [--hours N] [--no-graph] [--no-equipment] [--no-month]`: dry run of
   one bot cycle on a temporary copy of the DB (incl. -wal/-shm), no Telegram. One `poll_once`, one
-  `equipment_once`; prints snapshot, /status, live caption (+length vs 1024), would-be alerts,
+  `equipment_once`; prints snapshot, /status, live caption (+length vs 1024), would-be alerts
+  (per user; without subscribers a stand-in with the defaults), a MESSAGE TYPES sample (the 🟢
+  messages and /settings),
   /health, runtime context and Solarman calls used; writes `status_flow.png`, `live_flow.png`,
   `graph_{hours}h.png`, `month_{YYYY-MM}.png` (MONTH section; skipped on the portal backend or
   with `--no-month`), `report.txt` to `--out` (default `./preview`). Step errors are printed and
@@ -507,10 +562,10 @@ settings: `HEALTHCHECKS_POLL_S` (default 300, min 60), `HEALTHCHECKS_API_URL` (d
 - `diff(prev_state, checks, now)` is pure. State per check (unique_key, else uuid/slug) is
   `{"status", "down_since", "alerted"}` in `KEY_EQUIPMENT_STATE`. Alerts on transitions only:
   to `down` while not alerted -> `down`; to `up` while alerted -> `recovered`. Events carry the
-  check key; `down` is sent as a tracked alert in group `equip:<key>`, and `recovered` only
-  deletes it (no message).
+  check key; `down` is sent to every subscriber as a tracked alert in group `equip:<key>`, and
+  `recovered` resolves that group (delete, or a 🟢 reply, per user).
   grace/started/paused/new never alert; state survives restarts.
-- 3 consecutive API failures send one admin notice (admins' private chats, else alert chat);
+- 3 consecutive API failures send one admin notice (admins' private chats, else the delivery chats);
   cleared silently on the next success.
 - Bot: separate repeating job (`first` = 15 s), cache of the last `FetchResult` in
   `bot_data["equipment_cache"]`. `/health` (read-only access) lists entries in env order with

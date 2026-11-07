@@ -4,18 +4,30 @@ import asyncio
 import html
 import logging
 import math
-from collections.abc import Callable, Collection
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
+from functools import partial
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from telegram import BotCommand, InputMediaPhoto, Update
+from telegram import (
+    BotCommand,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    ReplyParameters,
+    Update,
+)
 from telegram.constants import ChatAction, ChatType, ParseMode
 from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -44,6 +56,7 @@ from vydpobot.i18n import (
     SUPPORTED,
     Lang,
     fmt_ago,
+    fmt_duration,
     fmt_hm,
     fmt_num,
     fmt_power,
@@ -87,6 +100,24 @@ from vydpobot.storage import (
     KEY_UNDELIVERABLE_NOTIFIED,
     Storage,
 )
+from vydpobot.subscribers import (
+    KEY_MEMBER_CACHE,
+    Subscriber,
+    active_subscribers,
+    apply_setting,
+    check_membership,
+    deactivate,
+    ensure_admins,
+    get_subscriber,
+    lang_from_code,
+    load_subscribers,
+    new_subscriber,
+    put_subscriber,
+    save_subscribers,
+    settings_markup,
+    settings_text,
+    user_allowed,
+)
 
 log = logging.getLogger(__name__)
 
@@ -115,7 +146,8 @@ EQUIP_EMOJI = {
 }
 NOT_FOUND_EMOJI = "❓"
 
-COMMANDS = ("start", "help", "status", "graph", "month", "threshold", "lang", "live", "health")
+COMMANDS = ("start", "status", "graph", "month", "health", "settings", "stop", "help")
+OPEN_BOT_DELETE_S = 60  # the "open the bot" reply in a group disappears after this long
 
 
 # --------------------------------------------------------------------------- pure helpers
@@ -131,22 +163,6 @@ def soc_bar(soc: float | None, cells: int = BAR_CELLS) -> str:
 
 def is_admin(user_id: int | None, settings: Settings) -> bool:
     return user_id is not None and user_id in settings.admin_user_ids
-
-
-def is_allowed(
-    chat_id: int,
-    chat_type: str,
-    user_id: int | None,
-    settings: Settings,
-    live_chats: Collection[int] = (),
-) -> bool:
-    """Read-only access: chats with a live message, ALERT_CHAT_ID, ALLOWED_CHAT_IDS; admins
-    anywhere (so an admin can send /live in a new group without configuring its ID)."""
-    if chat_id in live_chats or chat_id in settings.allowed_chat_ids:
-        return True
-    if settings.alert_chat_id and chat_id == settings.alert_chat_id:
-        return True
-    return is_admin(user_id, settings)
 
 
 def _num(x: float) -> str:
@@ -433,8 +449,7 @@ def equipment_line(result: FetchResult, lang: Lang, budget: int) -> str | None:
 
 
 def format_event(event: AlertEvent, lang: Lang, snapshot: Snapshot | None = None) -> str:
-    """HTML text for a drop or stale event (recovery and back-online send no message: they
-    delete the alerts instead)."""
+    """HTML text for one alert event; the 🟢 kinds are the 'resolved' messages."""
     match event.kind:
         case "drop":
             load = snapshot.load_w if snapshot else None
@@ -443,16 +458,24 @@ def format_event(event: AlertEvent, lang: Lang, snapshot: Snapshot | None = None
             level = event.level if event.level is not None else 0.0
             text = t(lang, "alert.drop", soc=_num(soc), level=_num(level), power=pw)
             return f"🪫 {html.escape(text)}"
-        case _:
+        case "stale":
             text = t(lang, "alert.stale", ago=fmt_ago(lang, event.stale_seconds or 0.0))
             return f"⚠️ {html.escape(text)}"
+        case "recovered":
+            soc = event.soc if event.soc is not None else 0.0
+            return f"🟢 {html.escape(t(lang, 'alert.battery_restored', soc=_num(soc)))}"
+        case _:
+            return f"🟢 {html.escape(t(lang, 'alert.back_online'))}"
 
 
 def format_equipment_event(event: EquipEvent, lang: Lang, tz: ZoneInfo, now: datetime) -> str:
-    """HTML text for a down event (check names are escaped). Recovery sends no message: the
-    down alert is deleted instead."""
-    when = _local(event.last_ping, tz, now) if event.last_ping else DASH
-    return f"🔴 {html.escape(t(lang, 'equip.down', name=event.name, time=when))}"
+    """HTML text for one equipment event (check names are escaped)."""
+    name = event.name
+    if event.kind == "down":
+        when = _local(event.last_ping, tz, now) if event.last_ping else DASH
+        return f"🔴 {html.escape(t(lang, 'equip.down', name=name, time=when))}"
+    dur = fmt_duration(lang, event.duration.total_seconds()) if event.duration else DASH
+    return f"🟢 {html.escape(t(lang, 'equip.recovered', name=name, duration=dur))}"
 
 
 def _utcnow() -> datetime:
@@ -486,6 +509,23 @@ def get_lang(bot_data: dict[str, Any]) -> Lang:
     settings: Settings = bot_data["settings"]
     val = bot_data["storage"].get_json(KEY_LANGUAGE)
     return val if val in SUPPORTED else settings.language
+
+
+def user_lang(bd: dict[str, Any], user: Any) -> Lang:
+    """Language of a private-chat user: the subscriber's choice, else from Telegram's language
+    code (uk), else the configured default."""
+    uid = getattr(user, "id", None)
+    if (sub := get_subscriber(bd["storage"], uid)) is not None:
+        return sub.lang
+    return lang_from_code(getattr(user, "language_code", None), bd["settings"].language)
+
+
+def user_threshold(bd: dict[str, Any], uid: int | None) -> float:
+    """Threshold of /status and /graph: the user's own, else the building default."""
+    sub = get_subscriber(bd["storage"], uid)
+    if sub is not None and sub.threshold is not None:
+        return sub.threshold
+    return get_threshold(bd)
 
 
 def _learned_capacity(bd: dict[str, Any], now: datetime) -> float | None:
@@ -733,13 +773,13 @@ async def get_station_id(bot_data: dict[str, Any]) -> int:
 
 @dataclass
 class PollResult:
-    """HTML messages produced by one poll cycle, by audience."""
+    """Events of one poll cycle. Texts are built per recipient (see Outgoing)."""
 
-    alerts: list[str] = field(default_factory=list)  # -> delivery chats
-    low_battery: list[str] = field(default_factory=list)  # -> delivery chats, deleted on recovery
-    battery_restored: bool = False  # SOC back above threshold + hysteresis: clean up low_battery
-    stale: list[str] = field(default_factory=list)  # "no fresh data" -> deleted when data is back
-    back_online: bool = False  # fresh data again: clean up stale (no message)
+    battery: dict[int, list[AlertEvent]] = field(
+        default_factory=dict
+    )  # per subscriber: drop/recovered
+    stale: list[AlertEvent] = field(default_factory=list)  # "no fresh data", for every subscriber
+    back_online: bool = False  # fresh data again: resolve the "stale" group
     admin_notices: list[str] = field(default_factory=list)  # -> admins' private chats
     snapshot: Snapshot | None = None  # fetched this cycle (None on failure)
 
@@ -780,7 +820,6 @@ async def _poll_once(bot_data: dict[str, Any], now: datetime) -> PollResult:
     settings: Settings = bot_data["settings"]
     storage: Storage = bot_data["storage"]
     source: DataSource = bot_data["source"]
-    lang = get_lang(bot_data)
     state = _load_state(storage)
     result = PollResult()
     try:
@@ -799,7 +838,7 @@ async def _poll_once(bot_data: dict[str, Any], now: datetime) -> PollResult:
         _save_state(storage, state)
         last = storage.latest_sample()
         ago = (now - last.ts).total_seconds() if last else fails * settings.poll_interval_s
-        result.stale = [format_event(AlertEvent("stale", stale_seconds=ago), lang)]
+        result.stale = [AlertEvent("stale", stale_seconds=ago)]
         return result
 
     result.snapshot = snap
@@ -809,29 +848,36 @@ async def _poll_once(bot_data: dict[str, Any], now: datetime) -> PollResult:
         storage.set_json(KEY_PORTAL_AUTH_NOTIFIED, False)
     events: list[AlertEvent] = []
     try:
-        is_new = storage.add_sample(snap)
-        if is_new:
-            state, ev = evaluate_soc(
-                state,
-                snap.soc,
-                get_threshold(bot_data),
-                settings.alert_step_pct,
-                settings.rearm_hysteresis_pct,
-            )
-            events += ev
-        state, ev = evaluate_staleness(state, snap.ts, now, settings.stale_after_min)
-        events += ev
+        if storage.add_sample(snap):
+            result.battery = _evaluate_subscribers(storage, snap, settings)
+        state = _load_state(storage)  # stale_notified only; the battery state is per subscriber
+        state, events = evaluate_staleness(state, snap.ts, now, settings.stale_after_min)
         _save_state(storage, state)
     except Exception:
         log.exception("Alert evaluation failed")
         return result
-    result.low_battery = [format_event(e, lang, snap) for e in events if e.kind == "drop"]
-    result.battery_restored = any(e.kind == "recovered" for e in events)  # no message, cleanup
-    result.stale = [format_event(e, lang, snap) for e in events if e.kind == "stale"]
-    result.back_online = any(e.kind == "back_online" for e in events)  # no message, cleanup
-    quiet = ("drop", "recovered", "stale", "back_online")
-    result.alerts = [format_event(e, lang, snap) for e in events if e.kind not in quiet]
+    result.stale = [e for e in events if e.kind == "stale"]
+    result.back_online = any(e.kind == "back_online" for e in events)
     return result
+
+
+def _evaluate_subscribers(
+    storage: Storage, snap: Snapshot, settings: Settings
+) -> dict[int, list[AlertEvent]]:
+    """Run the battery state machine of every active subscriber (threshold not off) on a new
+    sample and persist their states."""
+    subs = load_subscribers(storage)
+    out: dict[int, list[AlertEvent]] = {}
+    for uid, sub in subs.items():
+        if not sub.active or sub.threshold is None:
+            continue
+        sub.state, events = evaluate_soc(
+            sub.state, snap.soc, sub.threshold, sub.step, settings.rearm_hysteresis_pct
+        )
+        if events:
+            out[uid] = events
+    save_subscribers(storage, subs)
+    return out
 
 
 def equip_group(key: str) -> str:
@@ -853,9 +899,8 @@ def equipment_config_warning(settings: Settings) -> str | None:
 
 @dataclass
 class EquipmentResult:
-    alerts: list[str] = field(default_factory=list)  # -> delivery chats
-    tracked: list[tuple[str, str]] = field(default_factory=list)  # (group, 🔴 text) per down check
-    cleared: list[str] = field(default_factory=list)  # groups of recovered checks: delete, no 🟢
+    down: list[EquipEvent] = field(default_factory=list)  # newly down checks
+    recovered: list[EquipEvent] = field(default_factory=list)  # checks that are up again
     admin_notices: list[str] = field(default_factory=list)  # -> admins' private chats
     changed: bool = False  # events were produced
     refresh: bool = False  # the live message should be refreshed (events or new picture)
@@ -877,7 +922,6 @@ async def equipment_once(bd: dict[str, Any], now: datetime) -> EquipmentResult:
     monitor: EquipmentMonitor | None = bd.get("equipment")
     if monitor is None:
         return out
-    settings: Settings = bd["settings"]
     storage: Storage = bd["storage"]
     lang = get_lang(bd)
     try:
@@ -903,12 +947,8 @@ async def equipment_once(bd: dict[str, Any], now: datetime) -> EquipmentResult:
     except Exception:
         log.exception("Equipment evaluation failed")
         return out
-    out.tracked = [
-        (equip_group(e.key), format_equipment_event(e, lang, settings.tz, now))
-        for e in events
-        if e.kind == "down"
-    ]
-    out.cleared = [equip_group(e.key) for e in events if e.kind == "recovered"]
+    out.down = [e for e in events if e.kind == "down"]
+    out.recovered = [e for e in events if e.kind == "recovered"]
     out.changed = bool(events)
     out.refresh = out.refresh or out.changed
     return out
@@ -1116,12 +1156,6 @@ async def _refresh_live(
         storage.set_json(KEY_LIVE_MESSAGES, fresh)
 
 
-async def _refresh_live_now(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Immediate refresh from the latest stored sample (after /lang, /threshold)."""
-    bd = context.application.bot_data
-    await refresh_live(context.bot, bd, latest_snapshot(bd))
-
-
 # --------------------------------------------------------------------------- handlers
 
 
@@ -1130,43 +1164,80 @@ async def _reply(update: Update, text: str) -> None:
         await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
-async def _guard(update: Update, bot_data: dict[str, Any], *, admin: bool = False) -> bool:
-    """Check access; reply with a refusal in private chats. Returns True if allowed."""
-    settings: Settings = bot_data["settings"]
+def _chat_ids_for_membership(bd: dict[str, Any]) -> list[int]:
+    """Chats whose members may use the bot: chats with a live message and ALLOWED_CHAT_IDS."""
+    ids = [int(k) for k in _live_map(bd["storage"])]
+    return [*ids, *(c for c in bd["settings"].allowed_chat_ids if c not in ids)]
+
+
+async def _delete_later(context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id, message_id = context.job.data  # type: ignore[union-attr,misc]
+    with suppress(Exception):
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+
+
+async def _redirect_to_private(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A command in a group: delete it, point to the private chat with a button, and delete that
+    reply after a minute. Channel posts have no user and are never answered."""
+    chat, message, user = update.effective_chat, update.effective_message, update.effective_user
+    if chat is None or message is None or user is None or chat.type == ChatType.CHANNEL:
+        return
+    bd = context.application.bot_data
+    with suppress(Exception):  # best effort; may lack delete rights
+        await message.delete()
+    button = InlineKeyboardButton(
+        t(get_lang(bd), "group.open_bot"), url=f"https://t.me/{context.bot.username}?start=go"
+    )
+    try:
+        sent = await context.bot.send_message(
+            chat_id=chat.id,
+            text=html.escape(t(get_lang(bd), "group.use_private")),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[button]]),
+            message_thread_id=getattr(message, "message_thread_id", None)
+            if getattr(message, "is_topic_message", False)
+            else None,
+        )
+    except TelegramError as e:
+        log.info("Cannot answer in chat %s: %s", chat.id, e)
+        return
+    jq = getattr(context, "job_queue", None)
+    if jq is not None:
+        jq.run_once(
+            _delete_later, when=OPEN_BOT_DELETE_S, data=(chat.id, sent.message_id), name="open_bot"
+        )
+
+
+async def _access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Lang | None:
+    """Gate of the private-chat commands. Returns the user's language when allowed. In a group
+    the command is redirected to the private chat; in private a non-member is refused."""
     chat, user = update.effective_chat, update.effective_user
     if chat is None:
-        return False
-    uid = user.id if user else None
-    live = [int(k) for k in _live_map(bot_data["storage"])]
-    if not is_allowed(chat.id, chat.type, uid, settings, live):
-        log.info(
-            "Ignored command from chat_id=%s (%s %r), user_id=%s. "
-            "To allow it, send /live there as an admin or add it to ALLOWED_CHAT_IDS.",
-            chat.id,
-            chat.type,
-            chat.title or chat.username or "",
-            uid,
-        )
-        if chat.type == ChatType.PRIVATE:
-            await _reply(update, html.escape(t(get_lang(bot_data), "bot.not_allowed")))
-        return False
-    if admin and not is_admin(uid, settings):
-        await _reply(update, html.escape(t(get_lang(bot_data), "bot.admin_only")))
-        return False
-    return True
+        return None
+    if chat.type != ChatType.PRIVATE:
+        await _redirect_to_private(update, context)
+        return None
+    bd = context.application.bot_data
+    if user is None:
+        return None
+    lang = user_lang(bd, user)
+    if not await user_allowed(context.bot, bd, user.id, _chat_ids_for_membership(bd), _utcnow()):
+        log.info("Refused user_id=%s: not a member of any building chat", user.id)
+        await _reply(update, html.escape(t(lang, "bot.not_member")))
+        return None
+    return lang
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    bd = context.application.bot_data
-    if await _guard(update, bd):
-        await _reply(update, t(get_lang(bd), "bot.help"))  # trusted HTML
+    if (lang := await _access(update, context)) is not None:
+        await _reply(update, t(lang, "bot.help"))  # trusted HTML
 
 
 async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     bd = context.application.bot_data
-    if not await _guard(update, bd):
+    if (lang := await _access(update, context)) is None:
         return
-    lang, settings = get_lang(bd), bd["settings"]
+    settings = bd["settings"]
     monitor: EquipmentMonitor | None = bd.get("equipment")
     if monitor is None:
         await _reply(update, html.escape(t(lang, "health.disabled")))
@@ -1186,10 +1257,11 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     bd = context.application.bot_data
-    if not await _guard(update, bd):
+    if (lang := await _access(update, context)) is None:
         return
     settings: Settings = bd["settings"]
-    lang, now = get_lang(bd), datetime.now(UTC)
+    now = datetime.now(UTC)
+    uid = update.effective_user.id if update.effective_user else None
     snap = latest_snapshot(bd)  # no API call: /status must not spend quota
     if snap is None:
         await _reply(update, html.escape(t(lang, "bot.error")))
@@ -1200,7 +1272,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         lang,
         settings.tz,
         now,
-        get_threshold(bd),
+        user_threshold(bd, uid),
         settings.stale_after_min,
         runtime=runtime,
         grid_off=grid_off,
@@ -1267,9 +1339,10 @@ def _has_data(p: HistoryPoint) -> bool:
 
 async def cmd_graph(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     bd = context.application.bot_data
-    if not await _guard(update, bd):
+    if (lang := await _access(update, context)) is None:
         return
-    lang, settings = get_lang(bd), bd["settings"]
+    settings = bd["settings"]
+    uid = update.effective_user.id if update.effective_user else None
     hours = DEFAULT_GRAPH_HOURS
     if context.args:
         try:
@@ -1293,7 +1366,7 @@ async def cmd_graph(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             tz=settings.tz,
             lang=lang,
             hours=hours,
-            threshold=get_threshold(bd),
+            threshold=user_threshold(bd, uid),
             now=now,
             runtime=runtime,
             shutdown_soc=shutdown if runtime else None,
@@ -1311,21 +1384,34 @@ def _fmt_summary(s: dict[str, float], lang: Lang) -> dict[str, str]:
     return {k: fmt_num(lang, v, 1) for k, v in s.items()}
 
 
+async def _own_record(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> tuple[Lang, int, Subscriber] | None:
+    """(language, user id, record) of an allowed private user who has started the bot."""
+    if (lang := await _access(update, context)) is None or update.effective_user is None:
+        return None
+    uid = update.effective_user.id
+    sub = get_subscriber(context.application.bot_data["storage"], uid)
+    if sub is None:
+        await _reply(update, html.escape(t(lang, "sub.need_start")))
+        return None
+    return lang, uid, sub
+
+
 async def cmd_threshold(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    bd = context.application.bot_data
-    settings: Settings = bd["settings"]
-    lang = get_lang(bd)
-    if not context.args:
-        if await _guard(update, bd):
-            text = t(
-                lang,
-                "bot.threshold.current",
-                threshold=_num(get_threshold(bd)),
-                step=_num(settings.alert_step_pct),
-            )
-            await _reply(update, html.escape(text))
+    """Private shortcut: show or set the user's own battery alert start level."""
+    if (own := await _own_record(update, context)) is None:
         return
-    if not await _guard(update, bd, admin=True):
+    lang, uid, sub = own
+    storage: Storage = context.application.bot_data["storage"]
+    if not context.args:
+        if sub.threshold is None:
+            text = t(lang, "bot.threshold.off")
+        else:
+            text = t(
+                lang, "bot.threshold.current", threshold=_num(sub.threshold), step=_num(sub.step)
+            )
+        await _reply(update, html.escape(text))
         return
     try:
         value = float(context.args[0].replace(",", ".").rstrip("%"))
@@ -1334,109 +1420,269 @@ async def cmd_threshold(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not 5 <= value <= 100:
         await _reply(update, html.escape(t(lang, "bot.threshold.invalid")))
         return
-    storage: Storage = bd["storage"]
-    storage.set_json(KEY_THRESHOLD, value)
-    _save_state(storage, AlertState(stale_notified=_load_state(storage).stale_notified))
+    sub.threshold, sub.state = value, AlertState()
+    put_subscriber(storage, uid, sub)
     await _reply(update, html.escape(t(lang, "bot.threshold.set", threshold=_num(value))))
-    await _refresh_live_now(context)
 
 
 async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    bd = context.application.bot_data
-    lang = get_lang(bd)
-    if not context.args:
-        if await _guard(update, bd):
-            name = t(lang, f"bot.lang.name.{lang}")
-            await _reply(update, html.escape(t(lang, "bot.lang.current", lang=name)))
+    """Private shortcut: show or set the user's own language."""
+    if (own := await _own_record(update, context)) is None:
         return
-    if not await _guard(update, bd, admin=True):
+    lang, uid, sub = own
+    if not context.args:
+        name = t(lang, f"bot.lang.name.{lang}")
+        await _reply(update, html.escape(t(lang, "bot.lang.current", lang=name)))
         return
     new = context.args[0].lower()
     if new not in SUPPORTED:
         await _reply(update, html.escape(t(lang, "bot.lang.invalid")))
         return
-    bd["storage"].set_json(KEY_LANGUAGE, new)
+    sub.lang = new  # type: ignore[assignment]
+    put_subscriber(context.application.bot_data["storage"], uid, sub)
     await _reply(update, html.escape(t(new, "bot.lang.set")))
-    await _refresh_live_now(context)
+
+
+async def _send_settings(update: Update, bd: dict[str, Any], lang: Lang, uid: int) -> None:
+    sub = get_subscriber(bd["storage"], uid)
+    assert sub is not None and update.effective_message is not None
+    main = get_lang(bd) if is_admin(uid, bd["settings"]) else None
+    await update.effective_message.reply_text(
+        settings_text(sub, lang, main),
+        parse_mode=ParseMode.HTML,
+        reply_markup=settings_markup(sub, lang, main),
+    )
+
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Private: subscribe (or resubscribe) to alerts, then show help and the settings."""
+    if (lang := await _access(update, context)) is None or update.effective_user is None:
+        return
+    bd = context.application.bot_data
+    user = update.effective_user
+    sub = get_subscriber(bd["storage"], user.id)
+    if sub is None:
+        sub = new_subscriber(
+            bd["settings"], get_threshold(bd), getattr(user, "language_code", None)
+        )
+        lang = sub.lang
+    sub.active = True
+    put_subscriber(bd["storage"], user.id, sub)
+    await _reply(update, t(lang, "bot.help"))
+    await _send_settings(update, bd, lang, user.id)
+
+
+async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if (lang := await _access(update, context)) is None or update.effective_user is None:
+        return
+    bd, uid = context.application.bot_data, update.effective_user.id
+    deactivate(bd["storage"], uid)
+    await clear_alerts(context.bot, bd, f"low_battery:{uid}")  # never resolved while stopped
+    await _reply(update, html.escape(t(lang, "sub.stopped")))
+
+
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if (own := await _own_record(update, context)) is None:
+        return
+    await _send_settings(update, context.application.bot_data, own[0], own[1])
+
+
+async def on_settings_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Inline keyboard of /settings: `set:<kind>:<value>`; edits the message in place."""
+    query = update.callback_query
+    if query is None:
+        return
+    bd = context.application.bot_data
+    user, message = query.from_user, query.message
+    lang = user_lang(bd, user)
+
+    async def refuse(key: str) -> None:
+        await query.answer(text=t(lang, key), show_alert=True)
+
+    if message is None or message.chat.type != ChatType.PRIVATE:
+        await query.answer()
+        return
+    if not await user_allowed(context.bot, bd, user.id, _chat_ids_for_membership(bd), _utcnow()):
+        await refuse("bot.not_member")
+        return
+    sub = get_subscriber(bd["storage"], user.id)
+    parts = (query.data or "").split(":")
+    if sub is None or len(parts) != 3:
+        await refuse("sub.need_start" if sub is None else "settings.invalid")
+        return
+    _, kind, value = parts
+    admin = is_admin(user.id, bd["settings"])
+    if kind == "mainlang":
+        if not admin:
+            await refuse("bot.admin_only")
+            return
+        if value not in SUPPORTED:
+            await refuse("settings.invalid")
+            return
+        bd["storage"].set_json(KEY_LANGUAGE, value)
+        await refresh_live(context.bot, bd, latest_snapshot(bd))
+    elif apply_setting(sub, kind, value):
+        put_subscriber(bd["storage"], user.id, sub)
+        lang = sub.lang
+        if kind == "thr" and sub.threshold is None:  # alerts off: no recovery will clear them
+            await clear_alerts(context.bot, bd, f"low_battery:{user.id}")
+    else:
+        await refuse("settings.invalid")
+        return
+    main = get_lang(bd) if admin else None
+    try:
+        await query.edit_message_text(
+            settings_text(sub, lang, main),
+            parse_mode=ParseMode.HTML,
+            reply_markup=settings_markup(sub, lang, main),
+        )
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            log.warning("Cannot edit the settings message: %s", e)
+    await query.answer()
+
+
+def _parse_target(arg: str) -> int | str:
+    """`-1001234` -> int; `@channel`, `channel` or a t.me link -> '@channel'."""
+    arg = arg.strip().removeprefix("https://t.me/").removeprefix("http://t.me/")
+    if arg.lstrip("-").isdigit():
+        return int(arg)
+    return "@" + arg.removeprefix("@")
+
+
+async def _live_off(bot: Any, bd: dict[str, Any], chat_id: int, say: Callable[..., Any]) -> None:
+    storage: Storage = bd["storage"]
+    live = _live_map(storage)
+    if (key := str(chat_id)) not in live:
+        await say("live.not_active")
+        return
+    message_id = live.pop(key)["message_id"]
+    with suppress(Exception):
+        await bot.unpin_chat_message(chat_id=chat_id, message_id=message_id)
+    with suppress(Exception):
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    storage.set_json(KEY_LIVE_MESSAGES, live)
+    await say("live.stopped")
+
+
+async def _live_on(bot: Any, bd: dict[str, Any], chat_id: int, say: Callable[..., Any]) -> None:
+    """Start the live message in `chat_id`, or refresh it when it exists."""
+    settings: Settings = bd["settings"]
+    storage: Storage = bd["storage"]
+    live, key, lang = _live_map(storage), str(chat_id), get_lang(bd)
+    snap = latest_snapshot(bd)  # no API call
+    if snap is None:
+        await say("bot.error")
+    elif key in live:
+        await refresh_live(bot, bd, snap, only_chat=chat_id)
+        await say("live.started")
+    else:
+        now = datetime.now(UTC)
+        try:
+            grid_off, runtime = runtime_context(bd, snap, now)
+            caption = _live_caption(bd, snap, lang, now, runtime, grid_off)
+            png = await asyncio.to_thread(
+                render_flow,
+                snap,
+                lang=lang,
+                tz=settings.tz,
+                now=now,
+                stale_after_min=settings.stale_after_min,
+                checked_at=now,
+                runtime=runtime,
+                grid_off=grid_off,
+            )
+            message_id, pinned = await _send_live(bot, chat_id, png, caption)
+        except (BadRequest, Forbidden) as e:
+            log.warning("Live message creation failed in chat %s: %s", chat_id, e)
+            await say("live.target_no_rights")
+        except Exception:
+            log.exception("Live message creation failed")
+            await say("bot.error")
+        else:
+            live = _live_map(storage)
+            live[key] = _live_entry(message_id, now)
+            storage.set_json(KEY_LIVE_MESSAGES, live)
+            await say("live.started" if pinned else "live.no_pin_rights")
 
 
 async def cmd_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin: `/live` starts/refreshes the pinned live-status message, `/live off` removes it."""
-    bd = context.application.bot_data
-    if not await _guard(update, bd, admin=True):
+    """Admin. In a group: `/live` starts or refreshes the pinned live message, `/live off`
+    removes it. In a private chat: `/live <@channel or -100...>`, `/live off <target>`, and
+    `/live` alone lists the chats that have one."""
+    chat, message, user = update.effective_chat, update.effective_message, update.effective_user
+    if chat is None:
         return
-    chat, message = update.effective_chat, update.effective_message
-    assert chat is not None
+    bd = context.application.bot_data
     settings: Settings = bd["settings"]
-    storage: Storage = bd["storage"]
-    bot, lang, key = context.bot, get_lang(bd), str(chat.id)
-    live = _live_map(storage)
+    if not is_admin(user.id if user else None, settings):
+        if chat.type == ChatType.PRIVATE:
+            lang = user_lang(bd, user)
+            await _reply(update, html.escape(t(lang, "bot.admin_only")))
+        else:
+            await _redirect_to_private(update, context)
+        return
+    bot, private = context.bot, chat.type == ChatType.PRIVATE
+    lang = user_lang(bd, user) if private else get_lang(bd)
 
-    async def say(msg_key: str) -> None:
+    async def say(msg_key: str, **kw: Any) -> None:
         await bot.send_message(
-            chat_id=chat.id, text=html.escape(t(lang, msg_key)), parse_mode=ParseMode.HTML
+            chat_id=chat.id, text=html.escape(t(lang, msg_key, **kw)), parse_mode=ParseMode.HTML
         )
 
-    if context.args and context.args[0].lower() == "off":
-        if key not in live:
-            await say("live.not_active")
-        else:
-            message_id = live.pop(key)["message_id"]
-            with suppress(Exception):
-                await bot.unpin_chat_message(chat_id=chat.id, message_id=message_id)
-            with suppress(Exception):
-                await bot.delete_message(chat_id=chat.id, message_id=message_id)
-            storage.set_json(KEY_LIVE_MESSAGES, live)
-            await say("live.stopped")
-    else:
-        snap = latest_snapshot(bd)  # no API call
-        if snap is None:
-            await say("bot.error")
-        elif key in live:
-            await refresh_live(bot, bd, snap, only_chat=chat.id)
-            await say("live.started")
-        else:
-            now = datetime.now(UTC)
-            try:
-                grid_off, runtime = runtime_context(bd, snap, now)
-                caption = _live_caption(bd, snap, lang, now, runtime, grid_off)
-                png = await asyncio.to_thread(
-                    render_flow,
-                    snap,
-                    lang=lang,
-                    tz=settings.tz,
-                    now=now,
-                    stale_after_min=settings.stale_after_min,
-                    checked_at=now,
-                    runtime=runtime,
-                    grid_off=grid_off,
-                )
-                message_id, pinned = await _send_live(bot, chat.id, png, caption)
-            except Exception:
-                log.exception("Live message creation failed")
-                await say("bot.error")
+    args = list(context.args or [])
+    off = bool(args) and args[0].lower() == "off"
+    rest = args[1:] if off else args
+    target = chat.id
+    if private:
+        if not rest:
+            if off:
+                await say("live.usage")
+            elif live := _live_map(bd["storage"]):
+                await say("live.list", chats="\n".join(live))
             else:
-                live[key] = _live_entry(message_id, now)
-                storage.set_json(KEY_LIVE_MESSAGES, live)
-                await say("live.started" if pinned else "live.no_pin_rights")
-    if message is not None:
+                await say("live.list_empty")
+            return
+        try:
+            found = await bot.get_chat(chat_id=_parse_target(rest[0]))
+        except Forbidden:
+            await say("live.target_no_rights")
+            return
+        except TelegramError as e:
+            log.info("/live target %r not usable: %s", rest[0], e)
+            await say("live.target_not_found")
+            return
+        target = found.id
+    if off:
+        await _live_off(bot, bd, target, say)
+    else:
+        await _live_on(bot, bd, target, say)
+    if message is not None and not private:
         with suppress(Exception):  # best effort; may lack delete rights
             await message.delete()
 
 
 async def on_pin_notice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Delete the "bot pinned a photo" service message the bot's own pin leaves in live chats.
+    """Delete the "pinned a photo" service message the bot's own pin leaves in live chats.
 
-    Needs the "Delete messages" admin right; any failure is ignored.
+    In a group the message comes from the bot. In a channel it comes from the channel itself, so
+    it is recognised by the pinned message being the live message. Needs the "Delete messages"
+    admin right; any failure is ignored.
     """
     message, chat = update.effective_message, update.effective_chat
-    if message is None or chat is None or message.from_user is None:
-        return
-    if message.from_user.id != context.bot.id:
+    if message is None or chat is None:
         return
     bd = context.application.bot_data
     try:
-        if str(chat.id) not in _live_map(bd["storage"]):
+        live = _live_map(bd["storage"])
+        entry = live.get(str(chat.id))
+        if entry is None:
+            return
+        if chat.type == ChatType.CHANNEL:
+            pinned = getattr(message, "pinned_message", None)
+            if pinned is None or pinned.message_id != entry["message_id"]:
+                return
+        elif message.from_user is None or message.from_user.id != context.bot.id:
             return
         await context.bot.delete_message(chat_id=chat.id, message_id=message.message_id)
     except Exception as e:
@@ -1459,9 +1705,9 @@ async def build_month_report(
 
 async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     bd = context.application.bot_data
-    if not await _guard(update, bd):
+    if (lang := await _access(update, context)) is None:
         return
-    lang, settings = get_lang(bd), bd["settings"]
+    settings = bd["settings"]
     now = datetime.now(UTC)
     today = now.astimezone(settings.tz).date()
     year, month = today.year, today.month
@@ -1497,7 +1743,7 @@ async def cmd_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     with suppress(Exception):  # best effort; may lack delete rights
         await message.delete()
-    lang = get_lang(bd)
+    lang = user_lang(bd, user) if chat.type == ChatType.PRIVATE else get_lang(bd)
 
     async def say(key: str) -> None:
         await context.bot.send_message(
@@ -1527,14 +1773,15 @@ async def cmd_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def check_alert_chat(bot: Any, settings: Settings, storage: Storage) -> bool:
-    """Startup check of where automatic messages go (see delivery_chats). Logs the result; a set
-    but unreachable ALERT_CHAT_ID is an error and the admins are told privately. Never raises."""
+    """Startup check of where the live message and monthly report go (see delivery_chats). Logs
+    the result; a set but unreachable ALERT_CHAT_ID is an error and the admins are told
+    privately. Never raises."""
     chat_id, live = settings.alert_chat_id, list(_live_map(storage))
     if live:
-        log.info("Automatic messages go to the chat(s) with a live message: %s", ", ".join(live))
+        log.info("The live message and monthly report go to: %s", ", ".join(live))
     if chat_id == 0:
         if not live:
-            log.warning("No chat for alerts yet: send /live in the group (or set ALERT_CHAT_ID).")
+            log.warning("No chat for the live message yet: send /live in the group or channel.")
         return bool(live)
     try:
         await bot.get_chat(chat_id=chat_id)
@@ -1552,8 +1799,8 @@ async def check_alert_chat(bot: Any, settings: Settings, storage: Storage) -> bo
 
 
 def delivery_chats(bd: dict[str, Any]) -> list[int]:
-    """Where automatic messages go: every chat with a live message; ALERT_CHAT_ID only when there
-    is none (nothing when it is 0)."""
+    """Where the monthly report and live message go: every chat with a live message;
+    ALERT_CHAT_ID only when there is none (nothing when it is 0). Never alerts."""
     live = [int(k) for k in _live_map(bd["storage"])]
     alert = bd["settings"].alert_chat_id
     return live or ([alert] if alert else [])
@@ -1578,52 +1825,101 @@ async def broadcast(
 PENDING_ALERT_MAX_AGE = timedelta(hours=12)  # an older alert is no longer useful
 
 
-async def deliver_alerts(
-    bot: Any,
-    bd: dict[str, Any],
-    new: list[str],
-    now: datetime,
-    *,
-    low_battery: list[str] | tuple[str, ...] = (),
-    tracked: list[tuple[str, str]] | tuple[tuple[str, str], ...] = (),
-) -> None:
-    """Send alerts to the delivery chats. An alert that reaches no chat stays pending and is
-    retried at the next call (for up to 12 h), so an alert is never lost silently. When alerts
-    are stuck, the admins are told privately once (until something is delivered again).
+@dataclass
+class Outgoing:
+    """An alert to send. `render` builds the HTML text in a recipient's language; `uid` limits it
+    to one subscriber (None: every recipient). `group` ties it to its resolution."""
 
-    Tracked alerts, given as (group, text), are remembered with their message ids so that
-    `clear_alerts(group)` can delete them once the problem is gone: "low_battery", "stale", and
-    "equip:<check>"."""
+    group: str
+    render: Callable[[Lang], str]
+    uid: int | None = None
+
+
+def alert_recipients(bd: dict[str, Any]) -> dict[int, Lang]:
+    """{chat id: language} of the alert recipients: the active subscribers; ALERT_CHAT_ID when
+    there are none; else nobody."""
+    subs = active_subscribers(bd["storage"])
+    if subs:
+        return {uid: s.lang for uid, s in subs.items()}
+    if alert_chat := bd["settings"].alert_chat_id:
+        return {alert_chat: get_lang(bd)}
+    return {}
+
+
+def _dead_chat(e: TelegramError) -> bool:
+    """The recipient will never receive messages: the bot is blocked or the chat is gone."""
+    return isinstance(e, Forbidden) or (
+        isinstance(e, BadRequest) and "chat not found" in str(e).lower()
+    )
+
+
+async def deliver_alerts(bot: Any, bd: dict[str, Any], new: list[Outgoing], now: datetime) -> None:
+    """Send alerts to their recipients, one message per recipient in their language.
+
+    An alert that cannot be sent right now (timeout, network) stays pending and is retried at the
+    next call, for up to 12 h. A blocked or missing subscriber is deactivated and their pending
+    alerts dropped. Delivered alerts are remembered (chat, message id) under their group so that
+    `clear_alerts` can resolve them. An alert that reaches nobody is logged and the admins are
+    told once, until something is delivered again."""
     storage: Storage = bd["storage"]
-    pending = [
+    recipients = alert_recipients(bd)
+    if not recipients and new:
+        log.error("No alert recipients: nobody has started the bot and ALERT_CHAT_ID is not set")
+    stamp = now.isoformat()
+    queue = [
         p
         for p in storage.get_json(KEY_PENDING_ALERTS) or []
-        if now - datetime.fromisoformat(p["at"]) <= PENDING_ALERT_MAX_AGE
+        if "chat" in p and now - datetime.fromisoformat(p["at"]) <= PENDING_ALERT_MAX_AGE
     ]
-    groups = [*(("low_battery", m) for m in low_battery), *tracked]
-    queue = pending + [{"text": m, "at": now.isoformat(), "kind": g} for g, m in groups]
-    queue += [{"text": m, "at": now.isoformat()} for m in new]
-    if not queue:
+    lost = 0
+    for o in new:
+        targets = [o.uid] if o.uid is not None else list(recipients)
+        lost += not any(c in recipients for c in targets)
+        queue += [
+            {"chat": c, "text": o.render(recipients[c]), "at": stamp, "kind": o.group}
+            for c in targets
+            if c in recipients
+        ]
+    if not queue and not lost:
         return
-    chats = delivery_chats(bd)
-    delivered = await broadcast(bot, chats, [q["text"] for q in queue]) if chats else {}
+    queue = [q for q in queue if q["chat"] in recipients]  # drop those who unsubscribed meanwhile
+    dropped: list[dict[str, Any]] = []
     remembered = _tracked_map(storage)
+    remaining: list[dict[str, Any]] = []
+    gone: set[int] = set()
+    delivered = 0
     for q in queue:
-        if q.get("kind"):
-            for c, mid in delivered.get(q["text"], []):
-                if mid is not None:
-                    remembered.setdefault(q["kind"], []).append({"chat": c, "message_id": mid})
+        chat = q["chat"]
+        if chat in gone:
+            dropped.append(q)
+            continue
+        try:
+            sent = await bot.send_message(chat_id=chat, text=q["text"], parse_mode=ParseMode.HTML)
+        except TelegramError as e:
+            if _dead_chat(e) and chat in active_subscribers(storage):
+                log.warning("Subscriber %s cannot be reached (%s): deactivated", chat, e)
+                deactivate(storage, chat)
+                gone.add(chat)
+                dropped.append(q)
+            else:
+                log.warning("Cannot send to chat %s: %s", chat, e)
+                remaining.append(q)
+            continue
+        delivered += 1
+        if q.get("kind") and (mid := getattr(sent, "message_id", None)) is not None:
+            remembered.setdefault(q["kind"], []).append({"chat": chat, "message_id": mid})
     storage.set_json(KEY_TRACKED_ALERTS, remembered)
-    remaining = [q for q in queue if q["text"] not in delivered]
     storage.set_json(KEY_PENDING_ALERTS, remaining)
     if delivered:
         storage.set_json(KEY_UNDELIVERABLE_NOTIFIED, False)
-    if not remaining or storage.get_json(KEY_UNDELIVERABLE_NOTIFIED):
         return
-    log.error("%d alert(s) could not be delivered (chats: %s)", len(remaining), chats or "none")
+    stuck = len(remaining) + len(dropped) + lost
+    if not stuck or storage.get_json(KEY_UNDELIVERABLE_NOTIFIED):
+        return
+    log.error("%d alert(s) reached nobody (recipients: %s)", stuck, list(recipients) or "none")
     admins = list(bd["settings"].admin_user_ids)
     if admins:
-        text = html.escape(t(get_lang(bd), "alert.undeliverable", n=len(remaining)))
+        text = html.escape(t(get_lang(bd), "alert.undeliverable", n=stuck))
         if await broadcast(bot, admins, [text]):
             storage.set_json(KEY_UNDELIVERABLE_NOTIFIED, True)
 
@@ -1637,24 +1933,51 @@ def _tracked_map(storage: Storage) -> dict[str, list[dict[str, int]]]:
     return tracked
 
 
-async def clear_alerts(bot: Any, bd: dict[str, Any], group: str) -> None:
-    """The problem is gone: delete the alerts of `group` from the chats (no "resolved" message)
-    and drop any still pending. Telegram only deletes messages younger than 48 h."""
+async def clear_alerts(
+    bot: Any,
+    bd: dict[str, Any],
+    group: str,
+    resolved: Callable[[Lang], str] | None = None,
+) -> None:
+    """The problem is gone: resolve the alerts of `group` in every chat that got one.
+
+    An active subscriber with autodelete on, an inactive one, and a chat that is not a subscriber
+    (a legacy group or ALERT_CHAT_ID) get their alerts deleted (Telegram only deletes messages
+    younger than 48 h). A subscriber with autodelete off keeps them and gets one 🟢 `resolved`
+    message, sent as a reply to the newest alert. Pending alerts of the group are dropped."""
     storage: Storage = bd["storage"]
     tracked = _tracked_map(storage)
+    subs = load_subscribers(storage)
+    by_chat: dict[int, list[int]] = {}
     for m in tracked.pop(group, []):
-        try:
-            await bot.delete_message(chat_id=m["chat"], message_id=m["message_id"])
-        except TelegramError as e:
-            log.info("Cannot delete %s alert in chat %s: %s", group, m["chat"], e)
+        by_chat.setdefault(m["chat"], []).append(m["message_id"])
     storage.set_json(KEY_TRACKED_ALERTS, tracked)
     pending = storage.get_json(KEY_PENDING_ALERTS) or []
     storage.set_json(KEY_PENDING_ALERTS, [p for p in pending if p.get("kind") != group])
+    for chat, ids in by_chat.items():
+        sub = subs.get(chat)
+        if sub is not None and sub.active and not sub.autodelete and resolved is not None:
+            await _send_resolved(bot, bd, chat, ids[-1], resolved(sub.lang))
+            continue
+        for mid in ids:
+            try:
+                await bot.delete_message(chat_id=chat, message_id=mid)
+            except TelegramError as e:
+                log.info("Cannot delete %s alert in chat %s: %s", group, chat, e)
 
 
-async def clear_low_battery(bot: Any, bd: dict[str, Any]) -> None:
-    """Battery restored: delete the low-battery alerts of this discharge."""
-    await clear_alerts(bot, bd, "low_battery")
+async def _send_resolved(bot: Any, bd: dict[str, Any], chat: int, reply_to: int, text: str) -> None:
+    try:
+        await bot.send_message(
+            chat_id=chat,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_parameters=ReplyParameters(message_id=reply_to, allow_sending_without_reply=True),
+        )
+    except TelegramError as e:
+        log.warning("Cannot send the resolved message to chat %s: %s", chat, e)
+        if _dead_chat(e):
+            deactivate(bd["storage"], chat)
 
 
 def admin_targets(bd: dict[str, Any]) -> list[int]:
@@ -1668,18 +1991,19 @@ async def poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         now = datetime.now(UTC)
         result = await poll_once(bd, now)
-        if result.battery_restored:
-            await clear_low_battery(context.bot, bd)
+        snap, outgoing = result.snapshot, list[Outgoing]()
+        for uid, events in result.battery.items():
+            group = f"low_battery:{uid}"
+            for e in events:
+                if e.kind == "recovered":
+                    await clear_alerts(context.bot, bd, group, partial(format_event, e))
+                else:
+                    outgoing.append(Outgoing(group, partial(format_event, e, snapshot=snap), uid))
         if result.back_online:
-            await clear_alerts(context.bot, bd, "stale")
-        await deliver_alerts(
-            context.bot,
-            bd,
-            result.alerts,
-            now,
-            low_battery=result.low_battery,
-            tracked=[("stale", m) for m in result.stale],
-        )
+            back = partial(format_event, AlertEvent("back_online"))
+            await clear_alerts(context.bot, bd, "stale", back)
+        outgoing += [Outgoing("stale", partial(format_event, e)) for e in result.stale]
+        await deliver_alerts(context.bot, bd, outgoing, now)
         if result.admin_notices:
             await broadcast(context.bot, admin_targets(bd), result.admin_notices)
     except Exception:
@@ -1704,17 +2028,41 @@ async def balance_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def equipment_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     bd = context.application.bot_data
     try:
-        now = datetime.now(UTC)
+        now, tz = datetime.now(UTC), bd["settings"].tz
         result = await equipment_once(bd, now)
-        for group in result.cleared:
-            await clear_alerts(context.bot, bd, group)
-        await deliver_alerts(context.bot, bd, result.alerts, now, tracked=result.tracked)
+        for e in result.recovered:
+            render = partial(format_equipment_event, e, tz=tz, now=now)
+            await clear_alerts(context.bot, bd, equip_group(e.key), render)
+        outgoing = [
+            Outgoing(equip_group(e.key), partial(format_equipment_event, e, tz=tz, now=now))
+            for e in result.down
+        ]
+        await deliver_alerts(context.bot, bd, outgoing, now)
         if result.admin_notices:
             await broadcast(context.bot, admin_targets(bd), result.admin_notices)
         if result.refresh:
             await refresh_live(context.bot, bd, latest_snapshot(bd))
     except Exception:
         log.exception("Equipment job failed")
+
+
+async def membership_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Daily: deactivate subscribers who left every building chat. Admins stay. A user whose check
+    fails is kept; with no building chat to check against, nobody is removed."""
+    bd = context.application.bot_data
+    try:
+        chats = _chat_ids_for_membership(bd)
+        if not chats:
+            return
+        for uid in list(active_subscribers(bd["storage"])):
+            if is_admin(uid, bd["settings"]):
+                continue
+            if await check_membership(context.bot, chats, uid) is False:
+                log.info("Subscriber %s is no longer a member: deactivated", uid)
+                deactivate(bd["storage"], uid)
+                bd.get(KEY_MEMBER_CACHE, {}).pop(uid, None)
+    except Exception:
+        log.exception("Membership job failed")
 
 
 async def _startup_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1853,32 +2201,51 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 # --------------------------------------------------------------------------- app wiring
 
 
-def _commands(lang: Lang) -> list[BotCommand]:
+def _commands(lang: Lang, admin: bool = False) -> list[BotCommand]:
     desc = {
         "en": {
-            "start": "Show help",
-            "help": "Show help",
+            "start": "Turn alerts on and show help",
             "status": "Current inverter status",
             "graph": "Power and SOC chart [hours]",
             "month": "Monthly chart and statistics [YYYY-MM]",
-            "threshold": "View or set the SOC alert threshold",
-            "lang": "View or set the language",
-            "live": "Pinned live status (admin): /live, /live off",
             "health": "State of the building equipment",
+            "settings": "Alert level, repeat step, language",
+            "stop": "Turn alerts off",
+            "help": "Show help",
+            "live": "Live status (admin): /live [@channel], /live off [@channel]",
         },
         "uk": {
-            "start": "Показати довідку",
-            "help": "Показати довідку",
+            "start": "Увімкнути сповіщення та показати довідку",
             "status": "Поточний стан інвертора",
             "graph": "Графік потужності та заряду [годин]",
             "month": "Графік і статистика за місяць [РРРР-ММ]",
-            "threshold": "Переглянути або змінити поріг сповіщень",
-            "lang": "Переглянути або змінити мову",
-            "live": "Закріплений живий стан (адмін): /live, /live off",
             "health": "Стан обладнання будинку",
+            "settings": "Поріг, крок повтору, мова",
+            "stop": "Вимкнути сповіщення",
+            "help": "Показати довідку",
+            "live": "Живий стан (адмін): /live [@канал], /live off [@канал]",
         },
     }[lang]
-    return [BotCommand(c, desc[c]) for c in COMMANDS]
+    names = (*COMMANDS, "live") if admin else COMMANDS
+    return [BotCommand(c, desc[c]) for c in names]
+
+
+async def set_command_menus(bot: Any, settings: Settings) -> None:
+    """Private-chat menus (en, uk), no menu in groups, and a menu with /live for each admin.
+    Failures are logged: an admin who never started the bot cannot get a per-chat menu."""
+    private = BotCommandScopeAllPrivateChats()
+    await bot.set_my_commands(commands=_commands("en"), scope=private)
+    await bot.set_my_commands(commands=_commands("uk"), scope=private, language_code="uk")
+    await bot.set_my_commands(commands=[], scope=BotCommandScopeAllGroupChats())
+    for admin in settings.admin_user_ids:
+        scope = BotCommandScopeChat(chat_id=admin)
+        try:
+            await bot.set_my_commands(commands=_commands("en", True), scope=scope)
+            await bot.set_my_commands(
+                commands=_commands("uk", True), scope=scope, language_code="uk"
+            )
+        except TelegramError as e:
+            log.warning("Cannot set the command menu of admin %s: %s", admin, e)
 
 
 def make_equipment(settings: Settings) -> EquipmentMonitor | None:
@@ -1902,8 +2269,11 @@ async def _post_init(app: Application) -> None:
     equipment = make_equipment(settings)
     app.bot_data["equipment"] = equipment
     await check_alert_chat(app.bot, settings, storage)
-    await app.bot.set_my_commands(_commands("en"))
-    await app.bot.set_my_commands(_commands("uk"), language_code="uk")
+    ensure_admins(storage, settings, get_threshold(app.bot_data))
+    if not active_subscribers(storage):
+        log.warning("No active subscribers: alerts go to ALERT_CHAT_ID or nowhere.")
+    await set_command_menus(app.bot, settings)
+    await clear_alerts(app.bot, app.bot_data, "low_battery")  # legacy group alerts: just delete
     assert app.job_queue is not None
     app.job_queue.run_repeating(poll_job, interval=settings.poll_interval_s, first=10, name="poll")
     if equipment is not None:
@@ -1923,6 +2293,7 @@ async def _post_init(app: Application) -> None:
         )
         app.job_queue.run_once(monthly_startup_job, when=20, name="monthly_startup")
     app.job_queue.run_repeating(prune_job, interval=timedelta(days=1), first=60, name="prune")
+    app.job_queue.run_daily(membership_job, time(3, 30, tzinfo=settings.tz), name="membership")
 
 
 async def _post_shutdown(app: Application) -> None:
@@ -1944,7 +2315,9 @@ def run(settings: Settings) -> None:
     )
     app.bot_data["settings"] = settings
     for name, fn in (
-        ("start", cmd_help),
+        ("start", cmd_start),
+        ("stop", cmd_stop),
+        ("settings", cmd_settings),
         ("help", cmd_help),
         ("status", cmd_status),
         ("graph", cmd_graph),
@@ -1956,6 +2329,7 @@ def run(settings: Settings) -> None:
         ("token", cmd_token),  # hidden: not in COMMANDS / set_my_commands
     ):
         app.add_handler(CommandHandler(name, fn))
+    app.add_handler(CallbackQueryHandler(on_settings_button, pattern="^set:"))
     app.add_handler(MessageHandler(filters.StatusUpdate.PINNED_MESSAGE, on_pin_notice))
     app.add_error_handler(on_error)
     app.run_polling()

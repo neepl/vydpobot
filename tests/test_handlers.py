@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from telegram.error import BadRequest
 from telegram_fakes import real_bot_signatures
 
 from vydpobot import bot as bot_mod
@@ -16,9 +17,10 @@ from vydpobot.alerts import AlertState
 from vydpobot.i18n import MESSAGES, SUPPORTED, Lang, t
 from vydpobot.models import BatteryState, HistoryPoint, Snapshot
 from vydpobot.quota import ApiQuota
-from vydpobot.storage import KEY_ALERT_STATE, KEY_LANGUAGE, KEY_THRESHOLD, Storage
+from vydpobot.storage import KEY_LANGUAGE, KEY_THRESHOLD, Storage
+from vydpobot.subscribers import Subscriber, get_subscriber, put_subscriber
 
-ADMIN, USER = 7, 8
+ADMIN, USER, STRANGER = 7, 8, 9
 ALERT_CHAT, UNKNOWN_CHAT = -100, -999
 PNG = b"\x89PNG\r\n\x1a\n"
 
@@ -31,6 +33,7 @@ class Reply:
     kind: str  # "text" | "photo"
     text: str
     parse_mode: str | None
+    markup: Any = None
 
 
 class FakeMessage:
@@ -38,8 +41,10 @@ class FakeMessage:
         self.replies: list[Reply] = []
         self.deleted = False
 
-    async def reply_text(self, text: str, parse_mode: str | None = None, **_: Any) -> None:
-        self.replies.append(Reply("text", text, parse_mode))
+    async def reply_text(
+        self, text: str, parse_mode: str | None = None, reply_markup: Any = None, **_: Any
+    ) -> None:
+        self.replies.append(Reply("text", text, parse_mode, reply_markup))
 
     async def reply_photo(
         self, photo: bytes, caption: str = "", parse_mode: str | None = None, **_: Any
@@ -63,12 +68,28 @@ class FakeChat:
 
 @real_bot_signatures
 class FakeBot:
+    username = "vydpo_bot"
+    id = 4242
+
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
+        self.markups: list[Any] = []
         self.deleted: list[Any] = []
+        self.members: dict[int, dict[int, str]] = {}  # chat -> {user: status}
+        self.member_errors: set[int] = set()  # chats whose get_chat_member raises
+        self.member_calls = 0
 
-    async def send_message(self, chat_id: int, text: str, **_: Any) -> None:
+    async def send_message(self, chat_id: int, text: str, **kw: Any):
         self.sent.append((chat_id, text))
+        self.markups.append(kw.get("reply_markup"))
+        return SimpleNamespace(message_id=900 + len(self.sent))
+
+    async def get_chat_member(self, chat_id: int, user_id: int, **_: Any):
+        self.member_calls += 1
+        if chat_id in self.member_errors:
+            raise BadRequest("Chat not found")
+        status = self.members.get(chat_id, {}).get(user_id, "left")
+        return SimpleNamespace(status=status, is_member=False)
 
     async def delete_message(self, chat_id: int, message_id: int, **_: Any) -> None:
         self.deleted.append((chat_id, message_id))
@@ -103,6 +124,14 @@ class FakeSource:
         self.tokens.append(token)
 
 
+class FakeJobQueue:
+    def __init__(self) -> None:
+        self.once: list[tuple[Any, Any, Any]] = []
+
+    def run_once(self, callback: Any, when: Any, data: Any = None, name: Any = None) -> None:
+        self.once.append((callback, when, data))
+
+
 @dataclass
 class Env:
     storage: Storage
@@ -113,12 +142,14 @@ class Env:
     bot: FakeBot
     update: SimpleNamespace
     bot_data: dict[str, Any] = field(default_factory=dict)
+    jobs: FakeJobQueue = field(default_factory=FakeJobQueue)
 
     async def run(self, handler: Any, args: list[str]) -> list[Reply]:
         context = SimpleNamespace(
             args=args,
             application=SimpleNamespace(bot_data=self.bot_data),
             bot=self.bot,
+            job_queue=self.jobs,
         )
         await handler(self.update, context)
         return self.message.replies
@@ -126,12 +157,14 @@ class Env:
 
 # (chat id, chat type, user id)
 CHATS = {
-    "alert_group_admin": (ALERT_CHAT, "supergroup", ADMIN),
-    "alert_group_user": (ALERT_CHAT, "supergroup", USER),
+    "group_admin": (ALERT_CHAT, "supergroup", ADMIN),
+    "group_user": (ALERT_CHAT, "supergroup", USER),
     "admin_private": (ADMIN, "private", ADMIN),
-    "user_private": (USER, "private", USER),
-    "unknown_group": (UNKNOWN_CHAT, "group", USER),  # admins may use the bot anywhere
+    "member_private": (USER, "private", USER),  # a member of the building chat
+    "stranger_private": (STRANGER, "private", STRANGER),  # not a member of any chat
+    "unknown_group": (UNKNOWN_CHAT, "group", USER),
 }
+PRIVATE_USERS = ("admin_private", "member_private")
 
 
 @pytest.fixture
@@ -142,13 +175,14 @@ def make_env(tmp_path: Path):
         chat_id, chat_type, uid = CHATS[chat_key]
         settings = SimpleNamespace(
             alert_chat_id=ALERT_CHAT,
-            allowed_chat_ids=[],
+            allowed_chat_ids=[ALERT_CHAT],  # its members may use the bot
             admin_user_ids=[ADMIN],
             solarman_backend="portal",
             solarman_device_sn=None,
             solarman_station_id=None,
             alert_threshold_pct=50.0,
             alert_step_pct=5.0,
+            alert_autodelete=True,
             stale_after_min=30,
             language="en",
             tz=bot_mod.ZoneInfo("Europe/Kyiv"),
@@ -162,11 +196,16 @@ def make_env(tmp_path: Path):
             storage.add_sample(Snapshot(ts, 60 - i, 1000, 800, 0, -100, BatteryState.DISCHARGING))
         source = FakeSource()
         chat, message = FakeChat(chat_id, chat_type), FakeMessage()
+        for u in (ADMIN, USER):  # the admin is auto-subscribed; USER pressed /start earlier
+            put_subscriber(storage, u, Subscriber(lang=lang, threshold=50.0, step=5.0))
+        user = SimpleNamespace(id=uid, language_code=lang)
         update = SimpleNamespace(
-            effective_chat=chat, effective_message=message, effective_user=SimpleNamespace(id=uid)
+            effective_chat=chat, effective_message=message, effective_user=user
         )
         bd = {"settings": settings, "storage": storage, "source": source, "fail_count": 0}
-        return Env(storage, source, settings, chat, message, FakeBot(), update, bd)
+        bot = FakeBot()
+        bot.members[ALERT_CHAT] = {USER: "member", ADMIN: "creator"}
+        return Env(storage, source, settings, chat, message, bot, update, bd)
 
     yield make
     for s in storages:
@@ -210,18 +249,13 @@ CASES = [
     ("lang", ["de"], ("bot.lang.invalid", {})),
 ]
 
-NEEDS_ADMIN_WITH_ARGS = {"threshold", "lang"}
-
 
 def expected(chat_key: str, handler: str, args: list[str], outcome: Any, lang: Lang):
-    """Return (kind, text) of the expected reply, or None when the bot must stay silent."""
+    """Return (kind, text) of the expected reply in a private chat."""
     _, chat_type, uid = CHATS[chat_key]
-    if chat_key == "unknown_group":
-        return None
-    if chat_type == "private" and uid != ADMIN:
-        return "text", html.escape(t(lang, "bot.not_allowed"))
-    if handler in NEEDS_ADMIN_WITH_ARGS and args and uid != ADMIN:
-        return "text", html.escape(t(lang, "bot.admin_only"))
+    assert chat_type == "private", "group commands are redirected, not answered"
+    if uid == STRANGER:
+        return "text", html.escape(t(lang, "bot.not_member"))
     if outcome == "photo":
         return "photo", None
     key, kw = outcome
@@ -235,19 +269,15 @@ def expected(chat_key: str, handler: str, args: list[str], outcome: Any, lang: L
 
 
 @pytest.mark.parametrize("lang", SUPPORTED)
-@pytest.mark.parametrize("chat_key", CHATS)
+@pytest.mark.parametrize("chat_key", [k for k in CHATS if CHATS[k][1] == "private"])
 @pytest.mark.parametrize(("handler", "args", "outcome"), CASES)
 async def test_handler_matrix(make_env, chat_key, handler, args, outcome, lang) -> None:
     env = make_env(chat_key, lang)
     replies = await env.run(HANDLERS[handler], args)
-    exp = expected(chat_key, handler, args, outcome, lang)
-    if exp is None:
-        assert replies == []
-        return
     assert len(replies) == 1
     reply = replies[0]
     assert reply.parse_mode == "HTML"
-    kind, text = exp
+    kind, text = expected(chat_key, handler, args, outcome, lang)
     assert reply.kind == kind
     if kind == "text":
         assert reply.text == text
@@ -257,55 +287,118 @@ async def test_handler_matrix(make_env, chat_key, handler, args, outcome, lang) 
             assert html.escape(t(lang, "status.title")) in reply.text
 
 
+@pytest.mark.parametrize("lang", SUPPORTED)
+@pytest.mark.parametrize("chat_key", ["group_admin", "group_user", "unknown_group"])
+@pytest.mark.parametrize("handler", list(HANDLERS))
+async def test_group_command_is_deleted_and_points_to_the_private_chat(
+    make_env, chat_key, handler, lang
+) -> None:
+    env = make_env(chat_key, lang)
+    replies = await env.run(HANDLERS[handler], ["60"])
+    chat_id = CHATS[chat_key][0]
+    assert replies == [] and env.message.deleted
+    assert env.bot.sent == [(chat_id, html.escape(t(lang, "group.use_private")))]
+    (button,) = env.bot.markups[0].inline_keyboard[0]
+    assert button.text == t(lang, "group.open_bot")
+    assert button.url == "https://t.me/vydpo_bot?start=go"
+    ((_, when, data),) = env.jobs.once  # the reply disappears after 60 s
+    assert when == 60 and data == (chat_id, 901)
+    assert env.storage.get_json(KEY_THRESHOLD) is None  # nothing was changed
+
+
+async def test_group_reply_is_deleted_by_the_job(make_env) -> None:
+    env = make_env("group_user", "en")
+    await env.run(bot_mod.cmd_status, [])
+    callback, _, data = env.jobs.once[0]
+    await callback(SimpleNamespace(job=SimpleNamespace(data=data), bot=env.bot))
+    assert env.bot.deleted == [(ALERT_CHAT, 901)]
+
+
+async def test_group_command_survives_missing_delete_rights_and_job_queue(make_env) -> None:
+    env = make_env("group_user", "en")
+
+    async def boom() -> None:
+        raise BadRequest("no rights")
+
+    env.message.delete = boom
+    env.jobs = None  # type: ignore[assignment]
+    await env.run(bot_mod.cmd_help, [])
+    assert env.bot.sent  # the reply still goes out
+
+
+async def test_channel_posts_are_never_answered(make_env) -> None:
+    env = make_env("group_user", "en")
+    env.update.effective_user = None  # channel posts carry no user
+    env.chat.type = "channel"
+    await env.run(bot_mod.cmd_status, [])
+    assert env.bot.sent == [] and not env.message.deleted
+    env.update.effective_user = SimpleNamespace(id=USER)  # even with a user, a channel is silent
+    await env.run(bot_mod.cmd_status, [])
+    assert env.bot.sent == [] and not env.message.deleted
+
+
 # ------------------------------------------------------------------ side effects
 
 
 @pytest.mark.parametrize("lang", SUPPORTED)
-@pytest.mark.parametrize("chat_key", ["alert_group_admin", "admin_private"])
-async def test_threshold_persisted_and_state_reset(make_env, chat_key, lang) -> None:
+@pytest.mark.parametrize("chat_key", PRIVATE_USERS)
+async def test_threshold_is_personal_and_resets_only_their_state(make_env, chat_key, lang) -> None:
     env = make_env(chat_key, lang)
-    env.storage.set_json(
-        KEY_ALERT_STATE, AlertState(next_level=30, in_alert=True, stale_notified=True).to_dict()
-    )
+    uid = CHATS[chat_key][2]
+    other = ADMIN if uid == USER else USER
+    for u in (ADMIN, USER):
+        sub = get_subscriber(env.storage, u)
+        sub.state = AlertState(next_level=30, in_alert=True)
+        put_subscriber(env.storage, u, sub)
     await env.run(bot_mod.cmd_threshold, ["70%"])
-    assert env.storage.get_json(KEY_THRESHOLD) == 70.0
-    state = AlertState.from_dict(env.storage.get_json(KEY_ALERT_STATE))
-    assert state == AlertState(next_level=None, in_alert=False, stale_notified=True)
-    assert bot_mod.get_threshold(env.bot_data) == 70.0
+    mine = get_subscriber(env.storage, uid)
+    assert mine.threshold == 70.0 and mine.state == AlertState()
+    assert get_subscriber(env.storage, other).threshold == 50.0
+    assert get_subscriber(env.storage, other).state.in_alert  # untouched
+    assert env.storage.get_json(KEY_THRESHOLD) is None  # the building default is never changed
+    assert bot_mod.user_threshold(env.bot_data, uid) == 70.0
 
 
 @pytest.mark.parametrize("args", [["3"], ["abc"], ["101"]])
-@pytest.mark.parametrize("chat_key", CHATS)
+@pytest.mark.parametrize("chat_key", list(CHATS))
 async def test_invalid_or_denied_threshold_changes_nothing(make_env, chat_key, args) -> None:
     env = make_env(chat_key, "en")
-    state = AlertState(next_level=30, in_alert=True).to_dict()
-    env.storage.set_json(KEY_ALERT_STATE, state)
+    before = {u: get_subscriber(env.storage, u).to_dict() for u in (ADMIN, USER)}
     await env.run(bot_mod.cmd_threshold, args)
     assert env.storage.get_json(KEY_THRESHOLD) is None
-    assert env.storage.get_json(KEY_ALERT_STATE) == state
+    assert {u: get_subscriber(env.storage, u).to_dict() for u in (ADMIN, USER)} == before
 
 
-async def test_non_admin_cannot_set_threshold_or_lang(make_env) -> None:
-    env = make_env("alert_group_user", "en")
-    await env.run(bot_mod.cmd_threshold, ["60"])
-    await env.run(bot_mod.cmd_lang, ["uk"])
-    assert env.storage.get_json(KEY_THRESHOLD) is None
-    assert env.storage.get_json(KEY_LANGUAGE) == "en"
+async def test_threshold_without_a_record_asks_for_start(make_env) -> None:
+    env = make_env("member_private", "en")
+    env.storage.set_json("subscribers", {})
+    (reply,) = await env.run(bot_mod.cmd_threshold, ["60"])
+    assert reply.text == t("en", "sub.need_start")
+
+
+async def test_threshold_shows_off_state(make_env) -> None:
+    env = make_env("member_private", "en")
+    sub = get_subscriber(env.storage, USER)
+    sub.threshold = None
+    put_subscriber(env.storage, USER, sub)
+    (reply,) = await env.run(bot_mod.cmd_threshold, [])
+    assert reply.text == t("en", "bot.threshold.off")
 
 
 @pytest.mark.parametrize("start", SUPPORTED)
 @pytest.mark.parametrize("new", ["uk", "UK", "en", "EN"])
-async def test_lang_persisted(make_env, start, new) -> None:
-    env = make_env("admin_private", start)
+async def test_lang_is_personal(make_env, start, new) -> None:
+    env = make_env("member_private", start)
     await env.run(bot_mod.cmd_lang, [new])
-    assert env.storage.get_json(KEY_LANGUAGE) == new.lower()
-    assert bot_mod.get_lang(env.bot_data) == new.lower()
+    assert get_subscriber(env.storage, USER).lang == new.lower()
+    assert get_subscriber(env.storage, ADMIN).lang == start  # others unchanged
+    assert env.storage.get_json(KEY_LANGUAGE) == start  # the main chat language is not touched
 
 
 @pytest.mark.parametrize("lang", SUPPORTED)
 async def test_lang_current_does_not_raise_on_placeholder(make_env, lang) -> None:
     """Regression: `{lang}` placeholder used to collide with t()'s `lang` parameter."""
-    env = make_env("alert_group_user", lang)
+    env = make_env("member_private", lang)
     (reply,) = await env.run(bot_mod.cmd_lang, [])
     assert html.escape(t(lang, f"bot.lang.name.{lang}")) in reply.text
 
@@ -313,7 +406,7 @@ async def test_lang_current_does_not_raise_on_placeholder(make_env, lang) -> Non
 @pytest.mark.parametrize("lang", SUPPORTED)
 @pytest.mark.parametrize("args", [[], ["6"]])
 async def test_graph_falls_back_to_local_samples(make_env, lang, args) -> None:
-    env = make_env("alert_group_user", lang)
+    env = make_env("member_private", lang)
     (reply,) = await env.run(bot_mod.cmd_graph, args)
     assert env.source.history_calls == 1  # cloud was tried, raised
     assert reply.kind == "photo"
@@ -331,14 +424,14 @@ async def test_graph_without_any_data_still_replies(make_env, lang) -> None:
 
 @pytest.mark.parametrize("lang", SUPPORTED)
 async def test_status_uses_latest_sample_without_api_call(make_env, lang) -> None:
-    env = make_env("alert_group_user", lang)
+    env = make_env("member_private", lang)
     (reply,) = await env.run(bot_mod.cmd_status, [])
     assert reply.kind == "photo"
     assert env.source.snapshot_calls == 0 and env.source.history_calls == 0
 
 
 async def test_status_prefers_cached_poll_snapshot(make_env) -> None:
-    env = make_env("alert_group_user", "en")
+    env = make_env("member_private", "en")
     env.bot_data["last_snapshot"] = Snapshot(
         datetime.now(UTC), 77, 1, 2, 0, 0, BatteryState.IDLE, grid_online=False
     )
@@ -349,7 +442,7 @@ async def test_status_prefers_cached_poll_snapshot(make_env) -> None:
 
 @pytest.mark.parametrize("lang", SUPPORTED)
 async def test_status_without_any_sample_reports_error(make_env, lang) -> None:
-    env = make_env("alert_group_user", lang)
+    env = make_env("member_private", lang)
     env.storage.prune(datetime.now(UTC) + timedelta(days=1))
     (reply,) = await env.run(bot_mod.cmd_status, [])
     assert reply.text == html.escape(t(lang, "bot.error"))
@@ -369,14 +462,14 @@ def _fill(env, minutes: list[int]) -> None:
 
 
 async def test_graph_locally_covered_makes_no_history_call(make_env) -> None:
-    env = make_env("alert_group_user", "en")
+    env = make_env("member_private", "en")
     _fill(env, list(range(6 * 60, -1, -10)))  # 6 h, every 10 min
     (reply,) = await env.run(bot_mod.cmd_graph, ["6"])
     assert reply.kind == "photo" and env.source.history_calls == 0
 
 
 async def test_graph_gap_fetches_history_and_stores_points(make_env) -> None:
-    env = make_env("alert_group_user", "en")
+    env = make_env("member_private", "en")
     _fill(env, [360, 350, 340, 120, 110, 100, 5])  # hole between 340 and 120 min ago
     now = datetime.now(UTC)
     fetched = [
@@ -395,14 +488,14 @@ async def test_graph_gap_fetches_history_and_stores_points(make_env) -> None:
 
 
 async def test_graph_stale_start_fetches_history(make_env) -> None:
-    env = make_env("alert_group_user", "en")
+    env = make_env("member_private", "en")
     _fill(env, list(range(60, -1, -10)))  # only the last hour
     await env.run(bot_mod.cmd_graph, ["6"])
     assert env.source.history_calls == 1
 
 
 async def test_graph_skips_history_when_budget_exhausted(make_env, tmp_path) -> None:
-    env = make_env("alert_group_user", "en")
+    env = make_env("member_private", "en")
     quota = ApiQuota(env.storage, bot_mod.ZoneInfo("Europe/Kyiv"), 2)
     quota.record()
     quota.record()

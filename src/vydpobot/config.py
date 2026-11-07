@@ -35,12 +35,12 @@ class Settings(BaseSettings):
 
     # --- Telegram ---
     telegram_token: SecretStr
-    # Optional fallback chat for automatic messages (alerts, equipment, monthly report). They go to
-    # every chat with a live message (/live); this chat is used only when there is none. 0 = unset.
+    # Optional fallback chat for the monthly report and the live message when no chat has one yet,
+    # and for alerts when nobody is subscribed. 0 = unset.
     alert_chat_id: int = 0
-    # Users allowed to run admin commands (/threshold). Comma-separated in env.
+    # Users allowed to run admin commands (/live, /token). Comma-separated in env.
     admin_user_ids: IntList = Field(default_factory=list)
-    # Chats allowed to use read-only commands (besides ALERT_CHAT_ID and admins' private chats).
+    # Members of these chats (and of the chats with a live message) may use the bot in private.
     allowed_chat_ids: IntList = Field(default_factory=list)
 
     # --- Solarman backend ---
@@ -79,6 +79,8 @@ class Settings(BaseSettings):
     poll_interval_s: int = Field(default=300, ge=120)  # logger uploads ~every 5 min
     alert_threshold_pct: float = Field(default=50, ge=5, le=100)
     alert_step_pct: float = Field(default=10, ge=1, le=50)
+    # Default for new subscribers: delete their alerts when the problem is resolved.
+    alert_autodelete: bool = True
     # SOC must climb this much above threshold before the alert cycle fully re-arms.
     rearm_hysteresis_pct: float = Field(default=5, ge=2, le=30)  # >=2: SOC jitters ±1%
     # Warn when the logger hasn't reported for this long (0 disables).

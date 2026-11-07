@@ -166,7 +166,7 @@ def _status_env():
 
 async def test_status_sends_photo(monkeypatch: pytest.MonkeyPatch) -> None:
     update, context, message, chat = _status_env()
-    monkeypatch.setattr(bot, "_guard", _allow)
+    monkeypatch.setattr(bot, "_access", _allow)
     await bot.cmd_status(update, context)
     assert len(message.photos) == 1 and not message.texts
     assert message.photos[0][0].startswith(PNG)
@@ -175,7 +175,7 @@ async def test_status_sends_photo(monkeypatch: pytest.MonkeyPatch) -> None:
 
 async def test_status_falls_back_to_text(monkeypatch: pytest.MonkeyPatch) -> None:
     update, context, message, _ = _status_env()
-    monkeypatch.setattr(bot, "_guard", _allow)
+    monkeypatch.setattr(bot, "_access", _allow)
 
     def boom(*a, **k):
         raise RuntimeError("render failed")
@@ -186,8 +186,8 @@ async def test_status_falls_back_to_text(monkeypatch: pytest.MonkeyPatch) -> Non
     assert len(message.texts) == 1 and "Inverter status" in message.texts[0]
 
 
-async def _allow(update, bot_data, *, admin: bool = False) -> bool:
-    return True
+async def _allow(update, context) -> str:
+    return "en"
 
 
 def _assert_text_clear(s: Snapshot, lang: Lang) -> None:

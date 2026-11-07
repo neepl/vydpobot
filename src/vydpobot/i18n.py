@@ -9,27 +9,32 @@ SUPPORTED: tuple[Lang, ...] = ("en", "uk")
 
 _HELP_EN = (
     "<b>Deye inverter monitor</b>\n\n"
+    "Alerts come to this private chat. Use /settings to choose them.\n\n"
     "/status - current status with a power-flow diagram\n"
     "/graph [hours] - chart for the last 1-48 hours (default 24)\n"
-    "/threshold [value] - show or set the battery alert level, %\n"
-    "/lang [en|uk] - show or set the interface language\n"
-    "/live - pin a live status message that updates on every poll (admin)\n"
-    "/live off - stop and remove the live message (admin)\n"
     "/month [YYYY-MM] - monthly chart and statistics (default: this month)\n"
     "/health - state of the building equipment (healthchecks.io)\n"
+    "/settings - battery alert level, repeat step, language, auto-delete\n"
+    "/threshold [value] - show or set your battery alert level, %\n"
+    "/lang [en|uk] - show or set your language\n"
+    "/stop - turn alerts off\n"
+    "/start - turn alerts on\n"
+    "/live [@channel] - start the live message (admin; /live off [@channel] stops it)\n"
     "/help - this message"
 )
 _HELP_UK = (
     "<b>Моніторинг інвертора Deye</b>\n\n"
+    "Сповіщення надходять у цей приватний чат. Налаштуйте їх командою /settings.\n\n"
     "/status - поточний стан зі схемою потоків потужності\n"
     "/graph [години] - графік за останні 1-48 годин (типово 24)\n"
-    "/threshold [значення] - показати або змінити поріг сповіщення про заряд, %\n"
-    "/lang [en|uk] - показати або змінити мову інтерфейсу\n"
-    "/live - закріпити повідомлення зі станом, що оновлюється під час кожного опитування "
-    "(адмін)\n"
-    "/live off - зупинити й видалити живе повідомлення (адмін)\n"
     "/month [РРРР-ММ] - графік і статистика за місяць (типово: поточний)\n"
     "/health - стан обладнання будинку (healthchecks.io)\n"
+    "/settings - поріг заряду, крок повтору, мова, автовидалення\n"
+    "/threshold [значення] - показати або змінити ваш поріг сповіщення про заряд, %\n"
+    "/lang [en|uk] - показати або змінити вашу мову\n"
+    "/stop - вимкнути сповіщення\n"
+    "/start - увімкнути сповіщення\n"
+    "/live [@канал] - запустити живе повідомлення (адмін; /live off [@канал] зупиняє)\n"
     "/help - ця довідка"
 )
 
@@ -53,8 +58,8 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         ),
         "alert.stale": "No new data from the inverter, last update {ago}.",
         "alert.undeliverable": (
-            "⚠️ Alerts cannot be delivered: no chat is reachable. Send /live in the group "
-            "(or set ALERT_CHAT_ID). Waiting: {n}."
+            "⚠️ Alerts cannot be delivered: nobody has started the bot. Ask users to send "
+            "/start to the bot in a private chat (or set ALERT_CHAT_ID). Affected: {n}."
         ),
         "chart.title": "Last {hours} h",
         "chart.power_axis": "Power, kW",
@@ -84,6 +89,36 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "flow.stale": "Outdated data: {time} · {ago}",
         "flow.checked": "{time} · checked {check}",
         "flow.stale_checked": "No new data since {time} · checked {check}",
+        "alert.back_online": "Data from the inverter is flowing again.",
+        "alert.battery_restored": "Battery recharged to {soc}%.",
+        "equip.recovered": "{name} is back up (was down {duration})",
+        "bot.not_member": "This bot is for members of the building chat.",
+        "group.use_private": "Commands work in a private chat with the bot.",
+        "group.open_bot": "Open the bot",
+        "sub.need_start": "Send /start first.",
+        "sub.stopped": (
+            "Alerts are off. You can still use /status, /graph, /month and /health. "
+            "Send /start to turn alerts on."
+        ),
+        "bot.threshold.off": "Battery alerts are off. Turn them on in /settings.",
+        "settings.title": "Settings",
+        "settings.threshold": "Battery alerts start at: {value}",
+        "settings.step": "Repeat every: {value}",
+        "settings.autodelete": "Delete alerts when resolved: {value}",
+        "settings.language": "Language: {value}",
+        "settings.mainlang": "Main chat language (👥): {value}",
+        "settings.inactive": "Alerts are stopped. Send /start to turn them on.",
+        "settings.on": "On",
+        "settings.off": "Off",
+        "settings.invalid": "This value is not available.",
+        "live.list": "Chats with a live message:\n{chats}",
+        "live.list_empty": "No chat has a live message yet. Use /live @channel here.",
+        "live.usage": "Usage: /live @channel, /live off @channel. /live alone lists the chats.",
+        "live.target_not_found": "Chat not found. Use @channel or a numeric id (-100...).",
+        "live.target_no_rights": (
+            "I cannot post there. Make the bot an administrator of that chat with the rights "
+            "to post, edit and pin messages."
+        ),
         "bot.help": _HELP_EN,
         "bot.not_allowed": "Sorry, you are not allowed to use this bot.",
         "bot.admin_only": "This command is for administrators only.",
@@ -216,8 +251,9 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         ),
         "alert.stale": "Немає нових даних від інвертора, останнє оновлення {ago}.",
         "alert.undeliverable": (
-            "⚠️ Сповіщення не вдається доставити: немає доступного чату. Надішліть /live у "
-            "групі (або задайте ALERT_CHAT_ID). Очікують: {n}."
+            "⚠️ Сповіщення не вдається доставити: ніхто не запустив бота. Попросіть "
+            "користувачів надіслати боту /start у приватному чаті (або задайте ALERT_CHAT_ID). "
+            "Кількість: {n}."
         ),
         "chart.title": "Останні {hours} год",
         "chart.power_axis": "Потужність, кВт",
@@ -247,6 +283,38 @@ MESSAGES: dict[Lang, dict[str, str]] = {
         "flow.stale": "Дані застаріли: {time} · {ago}",
         "flow.checked": "{time} · перевірено {check}",
         "flow.stale_checked": "Немає нових даних з {time} · перевірено {check}",
+        "alert.back_online": "Дані від інвертора знову надходять.",
+        "alert.battery_restored": "Батарею заряджено до {soc}%.",
+        "equip.recovered": "{name} знову в нормі (не працювало {duration})",
+        "bot.not_member": "Цей бот для учасників чату будинку.",
+        "group.use_private": "Команди працюють у приватному чаті з ботом.",
+        "group.open_bot": "Відкрити бота",
+        "sub.need_start": "Спершу надішліть /start.",
+        "sub.stopped": (
+            "Сповіщення вимкнено. Команди /status, /graph, /month і /health працюють далі. "
+            "Надішліть /start, щоб увімкнути сповіщення."
+        ),
+        "bot.threshold.off": "Сповіщення про заряд вимкнено. Увімкніть їх у /settings.",
+        "settings.title": "Налаштування",
+        "settings.threshold": "Сповіщення про заряд від: {value}",
+        "settings.step": "Повторювати кожні: {value}",
+        "settings.autodelete": "Видаляти сповіщення, коли проблему усунено: {value}",
+        "settings.language": "Мова: {value}",
+        "settings.mainlang": "Мова головного чату (👥): {value}",
+        "settings.inactive": "Сповіщення зупинено. Надішліть /start, щоб увімкнути.",
+        "settings.on": "Увімк.",
+        "settings.off": "Вимк.",
+        "settings.invalid": "Це значення недоступне.",
+        "live.list": "Чати з живим повідомленням:\n{chats}",
+        "live.list_empty": "Жоден чат ще не має живого повідомлення. Надішліть тут /live @канал.",
+        "live.usage": (
+            "Використання: /live @канал, /live off @канал. /live без аргументів показує чати."
+        ),
+        "live.target_not_found": "Чат не знайдено. Вкажіть @канал або числовий id (-100...).",
+        "live.target_no_rights": (
+            "Я не можу там писати. Зробіть бота адміністратором цього чату з правами "
+            "публікувати, редагувати та закріплювати повідомлення."
+        ),
         "bot.help": _HELP_UK,
         "bot.not_allowed": "Вибачте, у вас немає доступу до цього бота.",
         "bot.admin_only": "Ця команда доступна лише адміністраторам.",

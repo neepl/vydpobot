@@ -340,3 +340,12 @@ def test_month_failure_keeps_other_sections(env, monkeypatch):
     code, out = env.run("--no-graph")
     assert code == 0 and "=== MONTH ===\nERROR" in out and "month down" in out
     assert "=== STATUS (/status) ===" in out
+
+
+def test_message_types_section_shows_resolved_and_settings(env):
+    code, out = env.run("--no-graph")
+    assert code == 0
+    section = out.split("=== MESSAGE TYPES ===\n")[1].split("\n\n=== ")[0]
+    assert "Battery recharged to" in section and "Data from the inverter is flowing" in section
+    assert "back up" in section and "Battery alerts start at" in section
+    assert "<b>" not in section

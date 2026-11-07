@@ -130,7 +130,11 @@ class FakeMessage:
 
 @real_bot_signatures
 class FakeBot:
+    username = "vydpo_bot"
+
     def __init__(self) -> None:
+        self.chats: dict[Any, Any] = {}  # get_chat targets; a value that is an Exception is raised
+        self.markups: list[Any] = []
         self.sent: list[tuple[int, str]] = []
         self.photos: list[tuple[int, str]] = []
         self.photo_silent: list[Any] = []
@@ -144,8 +148,18 @@ class FakeBot:
         self.edit_errors: dict[int, Exception] = {}
         self.next_id = 500
 
-    async def send_message(self, chat_id: int, text: str, **_: Any) -> None:
+    async def send_message(self, chat_id: int, text: str, **kw: Any):
         self.sent.append((chat_id, text))
+        self.markups.append(kw.get("reply_markup"))
+        return SimpleNamespace(message_id=800 + len(self.sent))
+
+    async def get_chat(self, chat_id: Any, **_: Any):
+        found = self.chats.get(chat_id)
+        if found is None:
+            raise BadRequest("Chat not found")
+        if isinstance(found, Exception):
+            raise found
+        return found
 
     async def send_photo(self, chat_id: int, photo: bytes, caption: str = "", **kw: Any):
         assert photo.startswith(PNG)
@@ -219,10 +233,10 @@ def env(tmp_path):
     storage.close()
 
 
-async def run_cmd(env, args, user=ADMIN, chat_id=CHAT):
+async def run_cmd(env, args, user=ADMIN, chat_id=CHAT, chat_type="supergroup"):
     message = FakeMessage()
     update = SimpleNamespace(
-        effective_chat=SimpleNamespace(id=chat_id, type="supergroup", title=None, username=None),
+        effective_chat=SimpleNamespace(id=chat_id, type=chat_type, title=None, username=None),
         effective_user=SimpleNamespace(id=user),
         effective_message=message,
     )
@@ -292,11 +306,18 @@ async def test_live_pin_failure_keeps_message(env):
     assert last_sent(env) == html.escape(t("en", "live.no_pin_rights"))
 
 
-async def test_live_non_admin_refused(env):
-    _, replies = await run_cmd(env, [], user=USER)
-    assert replies == [t("en", "bot.admin_only")]
+async def test_live_non_admin_in_a_group_is_redirected(env):
+    message, replies = await run_cmd(env, [], user=USER)
+    assert replies == [] and message.deleted
+    assert last_sent(env) == html.escape(t("en", "group.use_private"))
     assert not env.bot.photos
     assert live(env) is None
+
+
+async def test_live_non_admin_in_private_is_refused(env):
+    _, replies = await run_cmd(env, [], user=USER, chat_id=USER, chat_type="private")
+    assert replies == [html.escape(t("en", "bot.admin_only"))]
+    assert not env.bot.photos and live(env) is None
 
 
 async def test_live_other_allowed_chat(env):
@@ -328,6 +349,75 @@ async def test_live_falls_back_to_stored_sample(env):
     await run_cmd(env, [])
     assert env.source.calls == 0
     assert live(env) == {str(CHAT): 501}
+
+
+# `/live <target>` in a private chat: the admin starts the live message in a channel or group
+
+
+def known(env, ref, chat_id, title="Building"):
+    env.bot.chats[ref] = SimpleNamespace(id=chat_id, title=title)
+
+
+async def test_live_from_private_creates_the_message_in_the_target(env):
+    prime(env)
+    known(env, "@vydpo", -1001)
+    message, _ = await run_cmd(env, ["@vydpo"], chat_id=ADMIN, chat_type="private")
+    assert env.bot.photos[0][0] == -1001 and env.bot.pins[0][:2] == (-1001, 501)
+    assert live(env) == {"-1001": 501}
+    assert env.bot.sent == [(ADMIN, t("en", "live.started"))]  # the answer goes to the admin
+    assert not message.deleted  # the admin's own message in the private chat stays
+
+
+@pytest.mark.parametrize("arg", ["-1001", "vydpo", "https://t.me/vydpo"])
+async def test_live_from_private_accepts_ids_and_links(env, arg):
+    prime(env)
+    ref = int(arg) if arg.lstrip("-").isdigit() else "@vydpo"
+    known(env, ref, -1001)
+    await run_cmd(env, [arg], chat_id=ADMIN, chat_type="private")
+    assert live(env) == {"-1001": 501}
+
+
+async def test_live_from_private_refreshes_and_turns_off(env):
+    prime(env)
+    known(env, "@vydpo", -1001)
+    await run_cmd(env, ["@vydpo"], chat_id=ADMIN, chat_type="private")
+    await run_cmd(env, ["@vydpo"], chat_id=ADMIN, chat_type="private")
+    assert len(env.bot.photos) == 1 and len(env.bot.edits) == 1
+    await run_cmd(env, ["off", "@vydpo"], chat_id=ADMIN, chat_type="private")
+    assert env.bot.deleted == [(-1001, 501)] and live(env) == {}
+    assert last_sent(env) == t("en", "live.stopped")
+
+
+async def test_live_from_private_lists_the_chats(env):
+    await run_cmd(env, [], chat_id=ADMIN, chat_type="private")
+    assert last_sent(env) == html.escape(t("en", "live.list_empty"))
+    seed(env, -1001, -1002)
+    await run_cmd(env, [], chat_id=ADMIN, chat_type="private")
+    assert "-1001" in last_sent(env) and "-1002" in last_sent(env)
+    await run_cmd(env, ["off"], chat_id=ADMIN, chat_type="private")
+    assert last_sent(env) == html.escape(t("en", "live.usage"))
+
+
+async def test_live_from_private_reports_unknown_chat(env):
+    await run_cmd(env, ["@nobody"], chat_id=ADMIN, chat_type="private")
+    assert last_sent(env) == html.escape(t("en", "live.target_not_found"))
+    assert live(env) is None
+
+
+async def test_live_from_private_reports_missing_rights(env):
+    prime(env)
+    env.bot.chats["@vydpo"] = Forbidden("bot was kicked from the channel chat")
+    await run_cmd(env, ["@vydpo"], chat_id=ADMIN, chat_type="private")
+    assert last_sent(env) == html.escape(t("en", "live.target_no_rights"))
+    known(env, "@other", -1002)  # found, but posting is forbidden
+
+    async def deny(*a, **k):
+        raise Forbidden("not enough rights to send photos to the chat")
+
+    env.bot.send_photo = deny
+    await run_cmd(env, ["@other"], chat_id=ADMIN, chat_type="private")
+    assert last_sent(env) == html.escape(t("en", "live.target_no_rights"))
+    assert live(env) is None
 
 
 async def test_live_without_any_data_reports_error(env):
@@ -692,15 +782,18 @@ async def test_live_command_stores_created_at(env):
 BOT_ID = 4242
 
 
-async def run_pin_notice(env, from_id, chat_id=CHAT, fail=None):
+async def run_pin_notice(
+    env, from_id, chat_id=CHAT, fail=None, chat_type="supergroup", pinned=None
+):
     env.bot.id = BOT_ID
     if fail:
         env.bot.delete_error = fail
     update = SimpleNamespace(
-        effective_chat=SimpleNamespace(id=chat_id),
+        effective_chat=SimpleNamespace(id=chat_id, type=chat_type),
         effective_message=SimpleNamespace(
             message_id=777,
             from_user=None if from_id is None else SimpleNamespace(id=from_id),
+            pinned_message=None if pinned is None else SimpleNamespace(message_id=pinned),
         ),
     )
     await bot_mod.on_pin_notice(update, ctx(env))
@@ -710,6 +803,19 @@ async def test_pin_notice_of_the_bot_is_deleted(env):
     seed(env, CHAT)
     await run_pin_notice(env, BOT_ID)
     assert env.bot.deleted == [(CHAT, 777)]
+
+
+async def test_channel_pin_notice_of_the_live_message_is_deleted(env):
+    seed(env, -1001)  # live message id 900
+    await run_pin_notice(env, None, chat_id=-1001, chat_type="channel", pinned=900)
+    assert env.bot.deleted == [(-1001, 777)]
+
+
+async def test_channel_pin_notice_of_another_message_is_kept(env):
+    seed(env, -1001)
+    await run_pin_notice(env, None, chat_id=-1001, chat_type="channel", pinned=5)
+    await run_pin_notice(env, None, chat_id=-1001, chat_type="channel", pinned=None)
+    assert env.bot.deleted == []
 
 
 async def test_pin_notice_of_others_is_kept(env):
@@ -782,189 +888,3 @@ async def test_check_alert_chat(env, caplog, chat_id, live_chat, reachable, ok, 
     errors = [r for r in caplog.records if r.levelname == "ERROR"]
     assert bool(errors) is error
     assert [c for c, _ in sent] == ([ADMIN] if error else [])
-
-
-async def test_poll_alerts_go_to_the_live_chat(env, monkeypatch):
-    env.bd["settings"].alert_chat_id = 0
-    seed(env, -200)
-
-    async def fake_poll(bd, now):
-        return bot_mod.PollResult(alerts=["🪫 Battery dropped"], snapshot=snap())
-
-    monkeypatch.setattr(bot_mod, "poll_once", fake_poll)
-    await bot_mod.poll_job(ctx(env))
-    assert (-200, "🪫 Battery dropped") in env.bot.sent
-
-
-# ------------------------------------------------------------------ alerts are never lost silently
-
-
-class FlakyBot:
-    """send_message fails for chats in `down`."""
-
-    def __init__(self, down=()):
-        self.down, self.sent = set(down), []
-
-    async def send_message(self, chat_id, text, **kw):
-        if chat_id in self.down:
-            raise BadRequest("Chat not found")
-        self.sent.append((chat_id, text))
-
-
-async def test_undeliverable_alert_stays_pending_and_admins_are_told_once(env):
-    from vydpobot.storage import KEY_PENDING_ALERTS
-
-    env.bd["settings"].alert_chat_id = 0  # last night's situation: nowhere to deliver
-    bot = FlakyBot()
-    now = datetime.now(UTC)
-    await bot_mod.deliver_alerts(bot, env.bd, ["🪫 50%"], now)
-    await bot_mod.deliver_alerts(bot, env.bd, ["🪫 45%"], now + timedelta(minutes=5))
-    pending = [p["text"] for p in env.storage.get_json(KEY_PENDING_ALERTS)]
-    assert pending == ["🪫 50%", "🪫 45%"]  # nothing marked as sent
-    admin_msgs = [m for c, m in bot.sent if c == ADMIN]
-    assert len(admin_msgs) == 1 and "/live" in admin_msgs[0]  # told once, not every poll
-    # an admin sends /live: the next poll delivers everything that was waiting
-    seed(env, -200)
-    await bot_mod.deliver_alerts(bot, env.bd, ["🪫 40%"], now + timedelta(minutes=10))
-    assert [m for c, m in bot.sent if c == -200] == ["🪫 50%", "🪫 45%", "🪫 40%"]
-    assert env.storage.get_json(KEY_PENDING_ALERTS) == []
-
-
-async def test_failed_send_is_retried(env):
-    from vydpobot.storage import KEY_PENDING_ALERTS
-
-    seed(env, -200)
-    bot = FlakyBot(down={-200})
-    now = datetime.now(UTC)
-    await bot_mod.deliver_alerts(bot, env.bd, ["🪫 20%"], now)
-    assert [p["text"] for p in env.storage.get_json(KEY_PENDING_ALERTS)] == ["🪫 20%"]
-    bot.down.clear()  # Telegram reachable again
-    await bot_mod.deliver_alerts(bot, env.bd, [], now + timedelta(minutes=5))
-    assert (-200, "🪫 20%") in bot.sent and env.storage.get_json(KEY_PENDING_ALERTS) == []
-
-
-async def test_pending_alerts_expire_after_12_hours(env):
-    from vydpobot.storage import KEY_PENDING_ALERTS
-
-    env.bd["settings"].alert_chat_id = 0
-    bot = FlakyBot()
-    now = datetime.now(UTC)
-    await bot_mod.deliver_alerts(bot, env.bd, ["old"], now)
-    seed(env, -200)
-    await bot_mod.deliver_alerts(bot, env.bd, ["new"], now + timedelta(hours=13))
-    assert [m for c, m in bot.sent if c == -200] == ["new"]  # the stale alert is dropped
-    assert env.storage.get_json(KEY_PENDING_ALERTS) == []
-
-
-# ------------------------------------------------------------------ low-battery cleanup
-
-
-class TrackingBot(FlakyBot):
-    def __init__(self):
-        super().__init__()
-        self.next_id, self.deleted, self.delete_fail = 700, [], set()
-
-    async def send_message(self, chat_id, text, **kw):
-        await super().send_message(chat_id, text, **kw)
-        self.next_id += 1
-        return SimpleNamespace(message_id=self.next_id)
-
-    async def delete_message(self, chat_id, message_id):
-        if message_id in self.delete_fail:
-            raise BadRequest("Message can't be deleted")  # e.g. older than 48 h
-        self.deleted.append((chat_id, message_id))
-
-
-async def test_low_battery_alerts_deleted_when_battery_restored(env):
-    from vydpobot.storage import KEY_TRACKED_ALERTS
-
-    seed(env, -200)
-    bot = TrackingBot()
-    now = datetime.now(UTC)
-    await bot_mod.deliver_alerts(bot, env.bd, [], now, low_battery=["🪫 40%"])
-    await bot_mod.deliver_alerts(bot, env.bd, ["⚠️ stale"], now, low_battery=["🪫 30%"])
-    tracked = env.storage.get_json(KEY_TRACKED_ALERTS)["low_battery"]
-    assert [(m["chat"], m["message_id"]) for m in tracked] == [(-200, 701), (-200, 702)]
-    bot.delete_fail = {702}  # one deletion fails: the cleanup carries on
-    await bot_mod.clear_low_battery(bot, env.bd)
-    assert bot.deleted == [(-200, 701)]
-    assert "low_battery" not in env.storage.get_json(KEY_TRACKED_ALERTS)
-    # the other alert ("stale") was never tracked, so it is never deleted
-    assert all(mid != 703 for _, mid in bot.deleted)
-
-
-async def test_restore_drops_pending_low_battery_alerts(env):
-    from vydpobot.storage import KEY_PENDING_ALERTS
-
-    env.bd["settings"].alert_chat_id = 0  # nowhere to deliver: alerts stay pending
-    bot = TrackingBot()
-    now = datetime.now(UTC)
-    await bot_mod.deliver_alerts(bot, env.bd, ["⚠️ stale"], now, low_battery=["🪫 40%"])
-    await bot_mod.clear_low_battery(bot, env.bd)
-    assert [p["text"] for p in env.storage.get_json(KEY_PENDING_ALERTS)] == ["⚠️ stale"]
-
-
-async def test_legacy_low_battery_list_is_migrated(env):
-    from vydpobot.storage import KEY_LOW_BATTERY_MSGS
-
-    env.storage.set_json(KEY_LOW_BATTERY_MSGS, [{"chat": -200, "message_id": 55}])
-    bot = TrackingBot()
-    await bot_mod.clear_low_battery(bot, env.bd)
-    assert bot.deleted == [(-200, 55)]
-    assert env.storage.get_json(KEY_LOW_BATTERY_MSGS) == []
-
-
-async def test_groups_are_cleared_independently(env):
-    from vydpobot.storage import KEY_PENDING_ALERTS
-
-    seed(env, -200)
-    bot = TrackingBot()
-    now = datetime.now(UTC)
-    await bot_mod.deliver_alerts(
-        bot, env.bd, ["🔋 other"], now, low_battery=["🪫 40%"], tracked=[("stale", "⚠️ stale")]
-    )
-    await bot_mod.deliver_alerts(bot, env.bd, [], now, tracked=[("equip:k", "🔴 Lift")])
-    # 701 low battery, 702 stale, 703 plain (never deleted), 704 Lift
-    await bot_mod.clear_alerts(bot, env.bd, "stale")
-    assert bot.deleted == [(-200, 702)]
-    await bot_mod.clear_alerts(bot, env.bd, "equip:k")
-    await bot_mod.clear_alerts(bot, env.bd, "equip:k")  # nothing left: no-op
-    assert bot.deleted == [(-200, 702), (-200, 704)]
-    # undelivered tracked alerts are dropped from the queue when resolved
-    env.bd["settings"].alert_chat_id = 0
-    env.storage.set_json(KEY_LIVE_MESSAGES, {})
-    await bot_mod.deliver_alerts(bot, env.bd, ["plain"], now, tracked=[("stale", "⚠️ again")])
-    await bot_mod.clear_alerts(bot, env.bd, "stale")
-    assert [p["text"] for p in env.storage.get_json(KEY_PENDING_ALERTS)] == ["plain"]
-
-
-async def test_poll_job_deletes_stale_warning_when_back_online(env, monkeypatch):
-    seed(env, -200)
-    calls = []
-
-    async def fake_poll(bd, now):
-        return bot_mod.PollResult(back_online=True, snapshot=snap())
-
-    async def fake_clear(bot, bd, group):
-        calls.append(group)
-
-    monkeypatch.setattr(bot_mod, "poll_once", fake_poll)
-    monkeypatch.setattr(bot_mod, "clear_alerts", fake_clear)
-    await bot_mod.poll_job(ctx(env))
-    assert calls == ["stale"] and not env.bot.sent  # no "data is back" message
-
-
-async def test_poll_job_cleans_up_on_restore(env, monkeypatch):
-    seed(env, -200)
-    calls = []
-
-    async def fake_poll(bd, now):
-        return bot_mod.PollResult(battery_restored=True, snapshot=snap())
-
-    async def fake_clear(bot, bd):
-        calls.append("clear")
-
-    monkeypatch.setattr(bot_mod, "poll_once", fake_poll)
-    monkeypatch.setattr(bot_mod, "clear_low_battery", fake_clear)
-    await bot_mod.poll_job(ctx(env))
-    assert calls == ["clear"] and not env.bot.sent  # no "recovered" message

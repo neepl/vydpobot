@@ -385,6 +385,8 @@ def env(tmp_path):
         solarman_station_id=1,
         monthly_report_time="09:00",
         poll_interval_s=300,
+        alert_threshold_pct=50.0,
+        alert_step_pct=10.0,
     )
     source = FakeSource()
     bd = {"settings": settings, "storage": storage, "source": source, "fail_count": 0}
@@ -409,9 +411,9 @@ async def run_month(env, args, lang=None):
 
     update = SimpleNamespace(
         effective_chat=SimpleNamespace(
-            id=CHAT, type="supergroup", title=None, username=None, send_action=send_action
+            id=ADMIN, type="private", title=None, username=None, send_action=send_action
         ),
-        effective_user=SimpleNamespace(id=ADMIN),
+        effective_user=SimpleNamespace(id=ADMIN, language_code=lang),
         effective_message=SimpleNamespace(reply_text=reply_text, reply_photo=reply_photo),
     )
     ctx = SimpleNamespace(args=args, application=SimpleNamespace(bot_data=env.bd), bot=env.bot)
@@ -569,6 +571,9 @@ async def test_post_init_schedules_jobs(env, monkeypatch, tmp_path):
 
     class B:
         async def set_my_commands(self, *a, **k):
+            pass
+
+        async def get_chat_member(self, **k):
             pass
 
         async def get_chat(self, chat_id):

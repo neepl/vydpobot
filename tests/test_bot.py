@@ -14,13 +14,13 @@ from vydpobot.bot import (
     format_status,
     get_threshold,
     is_admin,
-    is_allowed,
     poll_once,
     soc_bar,
 )
 from vydpobot.models import BatteryState, Snapshot
 from vydpobot.solarman.portal import PortalAuthError
-from vydpobot.storage import KEY_PORTAL_AUTH_NOTIFIED, KEY_THRESHOLD, Storage
+from vydpobot.storage import KEY_PORTAL_AUTH_NOTIFIED, Storage
+from vydpobot.subscribers import Subscriber, put_subscriber
 
 TZ = ZoneInfo("Europe/Kyiv")
 NOW = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
@@ -102,19 +102,26 @@ def test_format_event() -> None:
     no_load = format_event(AlertEvent("drop", soc=47, level=50), "en", snap(load_w=None))
     assert "n/a" in no_load
     assert "1 hour ago" in format_event(AlertEvent("stale", stale_seconds=3700), "en")
+    assert format_event(AlertEvent("recovered", soc=62), "en") == "🟢 Battery recharged to 62%."
+    assert format_event(AlertEvent("recovered", soc=62), "uk") == "🟢 Батарею заряджено до 62%."
+    assert format_event(AlertEvent("back_online"), "en").startswith("🟢 ")
+    assert "знову" in format_event(AlertEvent("back_online"), "uk")
 
 
-def test_access() -> None:
-    cfg = SimpleNamespace(alert_chat_id=-100, allowed_chat_ids=[-200], admin_user_ids=[7])
-    assert is_allowed(-100, "supergroup", 1, cfg)  # type: ignore[arg-type]
-    assert is_allowed(-200, "group", None, cfg)  # type: ignore[arg-type]
-    assert is_allowed(7, "private", 7, cfg)  # type: ignore[arg-type]
-    assert not is_allowed(8, "private", 8, cfg)  # type: ignore[arg-type]
-    assert is_allowed(-300, "group", 7, cfg)  # type: ignore[arg-type]  # admin anywhere
-    assert not is_allowed(-300, "group", 8, cfg)  # type: ignore[arg-type]
-    assert is_allowed(-400, "group", 8, cfg, [-400])  # type: ignore[arg-type]  # live chat
-    unset = SimpleNamespace(alert_chat_id=0, allowed_chat_ids=[], admin_user_ids=[])
-    assert not is_allowed(0, "group", 8, unset)  # type: ignore[arg-type]  # 0 is not a chat
+def test_equipment_event_formats_in_each_language() -> None:
+    from vydpobot.bot import format_equipment_event
+    from vydpobot.equipment import EquipEvent
+
+    down = EquipEvent("down", "Lift", last_ping=NOW, key="lift")
+    up = EquipEvent("recovered", "Lift", duration=timedelta(hours=2), key="lift")
+    assert "Lift is down" in format_equipment_event(down, "en", TZ, NOW)
+    assert "немає сигналу" in format_equipment_event(down, "uk", TZ, NOW)
+    assert format_equipment_event(up, "en", TZ, NOW).startswith("🟢 Lift is back up")
+    assert "знову в нормі" in format_equipment_event(up, "uk", TZ, NOW)
+
+
+def test_is_admin() -> None:
+    cfg = SimpleNamespace(admin_user_ids=[7])
     assert is_admin(7, cfg) and not is_admin(8, cfg) and not is_admin(None, cfg)  # type: ignore[arg-type]
 
 
@@ -151,6 +158,7 @@ def bd(tmp_path: Path):
         language="en",
     )
     storage = Storage(tmp_path / "t.sqlite3")
+    put_subscriber(storage, SUB, Subscriber(threshold=50.0, step=5.0))
     data = {
         "settings": settings,
         "source": FakeClient(),
@@ -161,9 +169,21 @@ def bd(tmp_path: Path):
     storage.close()
 
 
+SUB = 1  # the subscriber of the fixture: threshold 50, step 5
+
+
+def drops(result) -> list[str]:
+    return [
+        format_event(e, "en", result.snapshot)
+        for events in result.battery.values()
+        for e in events
+        if e.kind == "drop"
+    ]
+
+
 async def poll_alerts(bd, now: datetime) -> list[str]:
     result = await poll_once(bd, now)
-    return result.low_battery + result.stale + result.alerts
+    return drops(result) + [format_event(e, "en") for e in result.stale]
 
 
 def at(minutes: int) -> datetime:
@@ -185,9 +205,10 @@ async def test_duplicate_timestamp_not_reevaluated(bd) -> None:
     assert await poll_alerts(bd, at(7)) == []
 
 
-async def test_threshold_override(bd) -> None:
-    bd["storage"].set_json(KEY_THRESHOLD, 30)
-    assert get_threshold(bd) == 30
+async def test_user_threshold_decides_not_the_building_default(bd) -> None:
+    bd["storage"].set_json("threshold_override", 80)  # the building default is not used
+    assert get_threshold(bd) == 80
+    put_subscriber(bd["storage"], SUB, Subscriber(threshold=30.0, step=5.0))
     bd["source"].queue = [snap(soc=45, ts=at(0)), snap(soc=29, ts=at(5))]
     assert await poll_alerts(bd, at(0)) == []
     assert len(await poll_alerts(bd, at(5))) == 1
@@ -200,7 +221,7 @@ async def test_stale_then_back_online(bd) -> None:
     assert len(msgs) == 1 and "No new data" in msgs[0]
     assert await poll_alerts(bd, at(50)) == []  # already notified
     back = await poll_once(bd, at(71))  # fresh data: the warning is deleted, no message
-    assert back.back_online and not back.stale and not back.alerts and not back.low_battery
+    assert back.back_online and not back.stale and not back.battery
 
 
 async def test_three_failures_one_notice(bd) -> None:
@@ -212,7 +233,7 @@ async def test_three_failures_one_notice(bd) -> None:
     assert results[3] == [] and results[4] == []
     bd["source"].queue = [snap(ts=at(40))]
     back = await poll_once(bd, at(41))
-    assert back.back_online and not back.stale and not back.alerts
+    assert back.back_online and not back.stale
     assert bd["fail_count"] == 0
 
 
@@ -552,9 +573,25 @@ def test_sunny_outage_summary_shows_grid_off():
     assert "🔌 немає" in summary and "0,0 кВт · 🔌" not in summary
 
 
-async def test_recovery_sends_nothing_and_flags_cleanup(bd) -> None:
+async def test_recovery_is_an_event_for_that_user(bd) -> None:
     bd["source"].queue = [snap(soc=48, ts=at(0)), snap(soc=60, ts=at(5), battery_w=3000)]
     first = await poll_once(bd, at(0))
-    assert len(first.low_battery) == 1 and not first.alerts
+    assert [e.kind for e in first.battery[SUB]] == ["drop"]
     restored = await poll_once(bd, at(5))  # 60% >= threshold 50 + hysteresis 5
-    assert restored.battery_restored and not restored.low_battery and not restored.alerts
+    assert [e.kind for e in restored.battery[SUB]] == ["recovered"]
+
+
+async def test_each_subscriber_has_their_own_threshold_and_state(bd) -> None:
+    put_subscriber(bd["storage"], 2, Subscriber(threshold=70.0, step=10.0))
+    put_subscriber(bd["storage"], 3, Subscriber(threshold=None))  # alerts off
+    put_subscriber(bd["storage"], 4, Subscriber(active=False, threshold=90.0))
+    bd["source"].queue = [snap(soc=65, ts=at(0)), snap(soc=48, ts=at(5)), snap(soc=44, ts=at(10))]
+    r1 = await poll_once(bd, at(0))
+    assert set(r1.battery) == {2}  # 65 <= 70 only for user 2
+    r2 = await poll_once(bd, at(5))
+    assert {uid: [(e.kind, e.level) for e in ev] for uid, ev in r2.battery.items()} == {
+        SUB: [("drop", 50.0)],
+        2: [("drop", 50.0)],  # 70, 60, 50: the 50 level is the one 48% has passed
+    }
+    r3 = await poll_once(bd, at(10))
+    assert {uid: [e.level for e in ev] for uid, ev in r3.battery.items()} == {SUB: [45.0]}

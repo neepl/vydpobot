@@ -18,8 +18,10 @@ from pathlib import Path
 from typing import Any
 
 from vydpobot import bot
+from vydpobot.alerts import AlertEvent
 from vydpobot.charts import render_chart, summarize
 from vydpobot.config import Settings
+from vydpobot.equipment import EquipEvent
 from vydpobot.flow import render_flow
 from vydpobot.i18n import Lang, t
 from vydpobot.models import Snapshot
@@ -31,6 +33,13 @@ from vydpobot.storage import (
     KEY_PORTAL_BOOTSTRAP_SHA,
     KEY_PORTAL_REFRESH_TOKEN,
     Storage,
+)
+from vydpobot.subscribers import (
+    active_subscribers,
+    ensure_admins,
+    new_subscriber,
+    put_subscriber,
+    settings_text,
 )
 
 log = logging.getLogger(__name__)
@@ -199,19 +208,25 @@ async def _run(
         alerts: list[str] = []
         notices: list[str] = []
         poll_errors: list[str] = []
+        _ensure_preview_subscriber(bd)
         with _capture() as cap:
             poll = await bot.poll_once(bd, now)
         ok = poll.snapshot is not None
         if not ok:
             poll_errors = cap.messages or ["Solarman poll failed"]
-        alerts += poll.low_battery + poll.stale + poll.alerts
+        for uid, events in poll.battery.items():
+            alerts += [f"[user {uid}] " + bot.format_event(e, lang, poll.snapshot) for e in events]
+        alerts += ["[all subscribers] " + bot.format_event(e, lang) for e in poll.stale]
         notices += poll.admin_notices
 
         equip_error = None
         if monitor is not None:
             with _capture() as cap:
                 eq = await bot.equipment_once(bd, now)
-            alerts += [text for _, text in eq.tracked] + eq.alerts
+            for e in eq.down + eq.recovered:
+                alerts.append(
+                    "[all subscribers] " + bot.format_equipment_event(e, lang, settings.tz, now)
+                )
             notices += eq.admin_notices
             if bd.get("equipment_fail_count"):
                 equip_error = "; ".join(cap.messages) or "healthchecks.io poll failed"
@@ -290,6 +305,9 @@ async def _run(
             files.append(_write(out / "live_flow.png", png))
 
         # 4. alerts
+        sections.append(
+            ("MESSAGE TYPES", strip_html("\n".join(_message_types(bd, snap, lang, now))))
+        )
         lines = [strip_html(m) for m in alerts]
         lines += [f"[admin] {strip_html(m)}" for m in notices]
         sections.append(("ALERTS (would be sent)", "\n".join(lines) or "none"))
@@ -381,6 +399,35 @@ async def _run(
     report = "\n\n".join(f"=== {title} ===\n{body}" for title, body in sections) + "\n"
     report_path.write_text(report, encoding="utf-8")
     return report, 0 if ok else 1
+
+
+def _ensure_preview_subscriber(bd: dict[str, Any]) -> None:
+    """The copied DB may have no subscribers; add admins, else a stand-in with the defaults, so
+    the battery alerts of the dry run are not empty."""
+    storage, settings = bd["storage"], bd["settings"]
+    threshold = bot.get_threshold(bd)
+    ensure_admins(storage, settings, threshold)
+    if not active_subscribers(storage):
+        put_subscriber(storage, 0, new_subscriber(settings, threshold))
+
+
+def _message_types(bd: dict[str, Any], snap: Any, lang: Lang, now: datetime) -> list[str]:
+    """One sample of each alert message type, incl. the 🟢 'resolved' replies of users who keep
+    their alerts, and the /settings message."""
+    soc = snap.soc if snap is not None and snap.soc is not None else 80.0
+    tz = bd["settings"].tz
+    check = EquipEvent("recovered", "Pump", duration=timedelta(minutes=95), key="pump")
+    sub = new_subscriber(bd["settings"], bot.get_threshold(bd))
+    sub.lang = lang
+    return [
+        "resolved (autodelete off):",
+        bot.format_event(AlertEvent("recovered", soc=soc), lang),
+        bot.format_event(AlertEvent("back_online"), lang),
+        bot.format_equipment_event(check, lang, tz, now),
+        "",
+        "/settings:",
+        settings_text(sub, lang, main_lang=bot.get_lang(bd)),
+    ]
 
 
 async def _aclose(obj: Any) -> None:

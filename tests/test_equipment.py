@@ -345,6 +345,7 @@ def env(tmp_path):
         language="en",
         tz=TZ,
         alert_threshold_pct=20.0,
+        alert_step_pct=10.0,
         stale_after_min=30,
         healthchecks_poll_s=300,
     )
@@ -382,9 +383,9 @@ async def test_equipment_once_tracks_down_and_clears_recovered(env):
         result(chk("Lift", "down", uk="k")), result(chk("Lift", "up", uk="k"))
     )
     first = await bot_mod.equipment_once(env.bd, NOW)
-    assert [g for g, _ in first.tracked] == ["equip:k"] and not first.alerts
+    assert [(e.key, e.name) for e in first.down] == [("k", "Lift")] and not first.recovered
     second = await bot_mod.equipment_once(env.bd, NOW + timedelta(minutes=5))
-    assert second.cleared == ["equip:k"] and not second.tracked and not second.alerts
+    assert [e.key for e in second.recovered] == ["k"] and not second.down
 
 
 def job_env(env, monkeypatch, *results):
@@ -468,7 +469,7 @@ async def test_unmatched_warns_once_per_change_never_alerts(env, caplog):
     caplog.set_level(logging.WARNING)
     for _ in range(3):
         out = await bot_mod.equipment_once(env.bd, NOW)
-        assert out.alerts == []
+        assert out.down == [] and out.recovered == []
     assert caplog.text.count("ghost") == 1
 
 
@@ -512,8 +513,8 @@ async def health(env, lang="en"):
     env.storage.set_json("language_override", lang)
     msg = Msg()
     update = SimpleNamespace(
-        effective_chat=SimpleNamespace(id=CHAT, type="supergroup", title=None, username=None),
-        effective_user=SimpleNamespace(id=5),
+        effective_chat=SimpleNamespace(id=ADMIN, type="private", title=None, username=None),
+        effective_user=SimpleNamespace(id=ADMIN, language_code=lang),
         effective_message=msg,
     )
     ctx = SimpleNamespace(application=SimpleNamespace(bot_data=env.bd), bot=env.bot, args=[])
@@ -756,8 +757,9 @@ def _post_init_env(env, monkeypatch, tmp_path, **kw):
     class B:
         commands = []
 
-        async def set_my_commands(self, cmds, **k):
-            B.commands.append([c.command for c in cmds])
+        async def set_my_commands(self, commands, **k):
+            if k.get("scope").__class__.__name__ == "BotCommandScopeAllPrivateChats":
+                B.commands.append([c.command for c in commands])
 
         async def get_chat(self, chat_id):
             return SimpleNamespace(id=chat_id)
